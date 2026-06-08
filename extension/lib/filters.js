@@ -307,12 +307,13 @@ export function evaluateProjectFilters(project, settings) {
   }
 
   const parsed = parseBudgetUsd(project.budget, bidType);
+  const effectiveMinUsd = Math.max(parsed.minUsd, project.budgetMinUsd || 0);
 
-  if (!meetsMinPrice(project.budget, bidType, minPriceUsd)) {
+  if (effectiveMinUsd < minPriceUsd) {
     return {
       pass: false,
-      reason: `price_below_min_${parsed.minUsd.toFixed(0)}usd`,
-      message: `価格が最低$${minPriceUsd}未満 (推定$${parsed.minUsd.toFixed(0)})`
+      reason: `price_below_min_${effectiveMinUsd.toFixed(0)}usd`,
+      message: `価格が最低$${minPriceUsd}未満 (推定$${effectiveMinUsd.toFixed(0)})`
     };
   }
 

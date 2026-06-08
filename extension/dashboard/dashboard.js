@@ -15,14 +15,19 @@ let autoSaveTimer = null;
 let isDirty = false;
 
 const FILTER_STATUS_LABELS = {
-  passed: '通過',
-  queued: 'キュー',
-  deferred: '待機',
-  bidding: '入札中',
-  skipped: 'スキップ',
-  success: '成功',
-  failed: '失敗'
+  system: 'SYSTEM',
+  scan: 'SCAN',
+  detected: 'DETECT',
+  passed: 'PASS',
+  queued: 'QUEUE',
+  deferred: 'WAIT',
+  bidding: 'BID',
+  skipped: 'SKIP',
+  success: 'OK',
+  failed: 'FAIL'
 };
+
+let renderedFilterIds = new Set();
 
 const $ = (id) => document.getElementById(id);
 
@@ -36,7 +41,7 @@ async function loadAll() {
   currentFilterStatus = await sendMessage('GET_FILTER_STATUS');
   renderSettings();
   renderStats();
-  renderFilterStatus();
+  renderFilterStatus(true);
   updateStatusBadge();
 }
 
@@ -117,38 +122,71 @@ function collectSettings() {
   };
 }
 
-function renderFilterStatus() {
-  const listEl = $('filterStatusList');
-  if (!listEl) return;
+function formatCmdTime(iso) {
+  if (!iso) return '--:--:--';
+  return new Date(iso).toLocaleTimeString('ja-JP', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  });
+}
 
-  listEl.innerHTML = '';
+function buildCmdLine(entry) {
+  const tag = FILTER_STATUS_LABELS[entry.status] || (entry.status || 'INFO').toUpperCase();
+  const time = formatCmdTime(entry.timestamp);
+  const title = entry.title && entry.title !== 'SYSTEM' && entry.title !== 'SCAN'
+    ? entry.title
+    : '';
+  const meta = [
+    entry.bidCount != null ? `${entry.bidCount}bids` : '',
+    entry.source ? `[${entry.source}]` : '',
+    entry.reason || ''
+  ].filter(Boolean).join(' ');
+  const detail = entry.message || '';
+  const titlePart = title ? `<span class="cmd-title">${escHtml(title)}</span> ` : '';
+  const metaPart = meta ? `<span class="cmd-detail">${escHtml(meta)}</span>` : '';
+  const detailPart = detail ? `<span class="cmd-detail">${title || meta ? '— ' : ''}${escHtml(detail)}</span>` : '';
+  return `<span class="cmd-time">[${time}]</span> <span class="cmd-tag">[${escHtml(tag)}]</span>${titlePart}${metaPart}${detailPart}`;
+}
+
+function appendCmdEntry(body, entry) {
+  const line = document.createElement('div');
+  line.className = `cmd-line cmd-${escAttr(entry.status || entry.level || 'info')}`;
+  line.dataset.entryId = entry.id || '';
+  line.innerHTML = buildCmdLine(entry);
+  body.appendChild(line);
+}
+
+function renderFilterStatus(forceRebuild = false) {
+  const body = $('filterStatusList');
+  if (!body) return;
+
+  if (forceRebuild) {
+    body.innerHTML = '';
+    renderedFilterIds.clear();
+  }
+
   if (!currentFilterStatus.length) {
-    const empty = document.createElement('div');
-    empty.className = 'filter-status-empty';
-    empty.textContent = 'フィルタリング状況はまだありません。自動入札を開始するとリアルタイムで表示されます。';
-    listEl.appendChild(empty);
+    body.innerHTML = '<div class="cmd-line cmd-system"><span class="cmd-time">[--:--:--]</span> <span class="cmd-tag">[SYSTEM]</span><span class="cmd-detail">Waiting for bot activity. Click 開始 to start monitoring.</span><span class="cmd-cursor"></span></div>';
+    renderedFilterIds.clear();
     return;
   }
 
-  currentFilterStatus.forEach((entry) => {
-    const div = document.createElement('div');
-    div.className = `filter-status-item ${entry.status || 'info'}`;
-    const statusLabel = FILTER_STATUS_LABELS[entry.status] || entry.status || '-';
-    const bidText = entry.bidCount != null ? `${entry.bidCount} bids` : 'bids ?';
-    const sourceText = entry.source === 'api' ? 'API' : '一覧';
+  const pending = currentFilterStatus.filter((entry) => !renderedFilterIds.has(entry.id));
+  for (const entry of pending.reverse()) {
+    appendCmdEntry(body, entry);
+    renderedFilterIds.add(entry.id);
+  }
 
-    div.innerHTML = `
-      <div class="filter-status-head">
-        <span class="filter-status-time">${formatTime(entry.timestamp)}</span>
-        <span class="filter-status-badge ${escAttr(entry.status)}">${escHtml(statusLabel)}</span>
-        <span class="filter-status-title">${escHtml(entry.title || entry.projectId || '-')}</span>
-      </div>
-      <button class="filter-status-delete" title="この項目を削除" data-entry-id="${escAttr(entry.id)}">×</button>
-      <div class="filter-status-meta">${escHtml(bidText)} · ${escHtml(sourceText)}${entry.reason ? ` · ${escHtml(entry.reason)}` : ''}</div>
-      <div class="filter-status-message">${escHtml(entry.message || '')}</div>
-    `;
-    listEl.appendChild(div);
-  });
+  let cursor = body.querySelector('.cmd-cursor-line');
+  if (!cursor) {
+    cursor = document.createElement('div');
+    cursor.className = 'cmd-line cmd-system cmd-cursor-line';
+    body.appendChild(cursor);
+  }
+  cursor.innerHTML = '<span class="cmd-cursor"></span>';
+  body.scrollTop = body.scrollHeight;
 }
 
 function escAttr(str) {
@@ -284,21 +322,11 @@ function setupEventListeners() {
   });
 
   $('btnClearFilterStatus').addEventListener('click', async () => {
-    if (!confirm('フィルタリング状況をすべて削除しますか？')) return;
+    if (!confirm('フィルタリングコンソールをクリアしますか？')) return;
     await sendMessage('CLEAR_FILTER_STATUS');
     currentFilterStatus = [];
-    renderFilterStatus();
-    showSaveStatus('フィルタリング状況を削除しました');
-  });
-
-  $('filterStatusList')?.addEventListener('click', async (event) => {
-    const btn = event.target.closest('.filter-status-delete');
-    if (!btn) return;
-    const entryId = btn.dataset.entryId;
-    if (!entryId) return;
-    const response = await sendMessage('DELETE_FILTER_STATUS_ENTRY', { entryId });
-    currentFilterStatus = response?.filterStatus || [];
-    renderFilterStatus();
+    renderFilterStatus(true);
+    showSaveStatus('フィルタリングコンソールをクリアしました');
   });
 
   $('portfolioLinksText')?.addEventListener('input', () => {
@@ -326,7 +354,7 @@ chrome.runtime.onMessage.addListener((msg) => {
   }
   if (msg.type === 'FILTER_STATUS_UPDATED') {
     currentFilterStatus = msg.filterStatus || [];
-    renderFilterStatus();
+    renderFilterStatus(false);
   }
 });
 
@@ -334,7 +362,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local') return;
   if (changes.filterStatus) {
     currentFilterStatus = changes.filterStatus.newValue || [];
-    renderFilterStatus();
+    renderFilterStatus(false);
   }
   if (changes.stats) {
     currentStats = { ...currentStats, ...changes.stats.newValue };

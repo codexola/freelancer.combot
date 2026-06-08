@@ -25,22 +25,30 @@ import { solveProblem } from '../lib/problem-solver.js';
 import { evaluateProjectFilters, evaluateAgeWindow, detectProjectLanguage } from '../lib/filters.js';
 import { finalizeProposal } from '../lib/portfolio.js';
 
-const PROJECTS_URL = 'https://www.freelancer.com/search/projects';
+const PROJECTS_URL = 'https://www.freelancer.com/search/projects?projectSort=latest';
 let monitorTabId = null;
 const bidQueue = [];
 let isProcessingBid = false;
 const pendingYoungProjects = new Map();
 let pendingRetryTimer = null;
+let lastScanLog = { at: 0, signature: '' };
 
 async function ensureMonitorTab() {
   const tabs = await chrome.tabs.query({ url: 'https://www.freelancer.com/search/projects*' });
   if (tabs.length > 0) {
     monitorTabId = tabs[0].id;
+    const tab = await chrome.tabs.get(monitorTabId);
+    if (!tab.url?.includes('projectSort=latest')) {
+      await chrome.tabs.update(monitorTabId, { url: PROJECTS_URL });
+      await waitForTabLoad(monitorTabId);
+      await waitForContentScript(monitorTabId);
+    }
     return monitorTabId;
   }
   const tab = await chrome.tabs.create({ url: PROJECTS_URL, active: false });
   monitorTabId = tab.id;
   await waitForTabLoad(tab.id);
+  await waitForContentScript(tab.id);
   return tab.id;
 }
 
@@ -62,6 +70,12 @@ async function startBot() {
   const settings = await getSettings();
   await saveSettings({ isRunning: true });
   const tabId = await ensureMonitorTab();
+  await addFilterStatusEntry({
+    status: 'system',
+    level: 'info',
+    message: `Bot started — monitoring ${PROJECTS_URL}`,
+    title: 'SYSTEM'
+  });
   try {
     await chrome.tabs.sendMessage(tabId, { type: 'START_MONITORING' });
   } catch {
@@ -87,6 +101,9 @@ function sleep(ms) {
 
 async function recordFilterStatus(project, status, details = {}) {
   const levelMap = {
+    system: 'info',
+    scan: 'info',
+    detected: 'info',
     passed: 'info',
     queued: 'info',
     deferred: 'info',
@@ -224,6 +241,9 @@ async function handleDetectedProjects(projects) {
   await clearStaleQueuedProjects();
 
   for (const project of projects) {
+    await recordFilterStatus(project, 'detected', {
+      message: `新規検出 [${project.source || 'monitor'}] ${project.budget || 'budget?'} / ${project.bidCount ?? '?'} bids`
+    });
     const { pass, reason, message, defer, retryInMs } = await filterProject(project, settings);
     if (pass) {
       await recordFilterStatus(project, 'passed', { message: 'フィルター通過' });
@@ -543,6 +563,31 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         break;
       case 'NEW_PROJECTS_DETECTED': {
         sendResponse(await handleDetectedProjects(msg.projects || []));
+        break;
+      }
+      case 'MONITOR_SCAN_RESULT': {
+        const signature = `${msg.domCount}|${msg.apiCount}|${msg.seeded}|${msg.newCount}`;
+        const now = Date.now();
+        const shouldLog =
+          msg.seeded ||
+          (msg.newCount ?? 0) > 0 ||
+          signature !== lastScanLog.signature ||
+          now - lastScanLog.at > 15000;
+        if (shouldLog) {
+          const parts = [
+            `DOM:${msg.domCount ?? 0}`,
+            `API:${msg.apiCount ?? 0}`,
+            msg.seeded ? 'seeded baseline' : `new:${msg.newCount ?? 0}`
+          ];
+          await addFilterStatusEntry({
+            status: 'scan',
+            level: 'info',
+            title: 'SCAN',
+            message: parts.join(' | ')
+          });
+          lastScanLog = { at: now, signature };
+        }
+        sendResponse({ ok: true });
         break;
       }
       case 'GET_FILTER_STATUS':

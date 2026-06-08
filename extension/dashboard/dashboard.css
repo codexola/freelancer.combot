@@ -258,88 +258,95 @@ body {
   min-height: 20px;
 }
 
-.log-list, .history-list, .filter-status-list {
+.log-list, .history-list {
   max-height: 300px;
   overflow-y: auto;
 }
 
-.filter-status-list {
-  max-height: 360px;
+.cmd-terminal {
+  border: 1px solid #1f2937;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #0c0c0c;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.03);
 }
 
-.filter-status-item {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 4px 8px;
-  padding: 10px;
-  border-bottom: 1px solid var(--border);
-  font-size: 0.8rem;
-}
-
-.filter-status-item.passed,
-.filter-status-item.queued,
-.filter-status-item.bidding,
-.filter-status-item.deferred { border-left: 3px solid var(--info); }
-.filter-status-item.skipped { border-left: 3px solid var(--warning); }
-.filter-status-item.success { border-left: 3px solid var(--success); }
-.filter-status-item.failed { border-left: 3px solid var(--danger); }
-
-.filter-status-head {
+.cmd-terminal-header {
   display: flex;
   align-items: center;
   gap: 8px;
-  flex-wrap: wrap;
+  padding: 8px 12px;
+  background: #1a1a1a;
+  border-bottom: 1px solid #2d2d2d;
 }
 
-.filter-status-title {
-  font-weight: 600;
+.cmd-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
 }
 
-.filter-status-badge {
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-size: 0.68rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  background: var(--surface2);
-  color: var(--text-muted);
+.cmd-dot.red { background: #ff5f57; }
+.cmd-dot.yellow { background: #febc2e; }
+.cmd-dot.green { background: #28c840; }
+
+.cmd-title {
+  margin-left: 6px;
+  font-family: Consolas, 'Courier New', monospace;
+  font-size: 0.72rem;
+  color: #9ca3af;
 }
 
-.filter-status-badge.passed,
-.filter-status-badge.queued,
-.filter-status-badge.bidding,
-.filter-status-badge.deferred { color: var(--info); }
-.filter-status-badge.skipped { color: var(--warning); }
-.filter-status-badge.success { color: var(--success); }
-.filter-status-badge.failed { color: var(--danger); }
-
-.filter-status-meta,
-.filter-status-message {
-  grid-column: 1 / -1;
-  color: var(--text-muted);
-  font-size: 0.74rem;
+.cmd-terminal-body {
+  min-height: 360px;
+  max-height: 420px;
+  overflow-y: auto;
+  padding: 12px 14px;
+  font-family: Consolas, 'Courier New', monospace;
+  font-size: 0.78rem;
+  line-height: 1.55;
+  color: #c7d2c7;
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+    #0c0c0c;
+  background-size: 100% 1.55em, 1.55em 100%, 100% 100%;
 }
 
-.filter-status-delete {
-  background: none;
-  border: none;
-  color: var(--text-muted);
-  cursor: pointer;
-  font-size: 1rem;
-  line-height: 1;
-  padding: 2px 6px;
-  border-radius: 4px;
+.cmd-line {
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin-bottom: 2px;
 }
 
-.filter-status-delete:hover {
-  color: var(--danger);
-  background: rgba(239, 68, 68, 0.12);
+.cmd-line .cmd-time { color: #6b7280; }
+.cmd-line .cmd-tag { font-weight: 700; margin-right: 8px; }
+.cmd-line .cmd-title { color: #e5e7eb; }
+.cmd-line .cmd-detail { color: #9ca3af; }
+
+.cmd-line.cmd-system .cmd-tag,
+.cmd-line.cmd-scan .cmd-tag { color: #60a5fa; }
+.cmd-line.cmd-detected .cmd-tag { color: #38bdf8; }
+.cmd-line.cmd-passed .cmd-tag,
+.cmd-line.cmd-queued .cmd-tag,
+.cmd-line.cmd-deferred .cmd-tag,
+.cmd-line.cmd-bidding .cmd-tag { color: #4ade80; }
+.cmd-line.cmd-skipped .cmd-tag { color: #fbbf24; }
+.cmd-line.cmd-success .cmd-tag { color: #22c55e; }
+.cmd-line.cmd-failed .cmd-tag { color: #f87171; }
+
+.cmd-cursor {
+  display: inline-block;
+  width: 8px;
+  height: 1em;
+  background: #4ade80;
+  animation: cmd-blink 1s step-end infinite;
+  vertical-align: text-bottom;
 }
 
-.filter-status-empty {
-  padding: 16px 10px;
-  color: var(--text-muted);
-  font-size: 0.82rem;
+@keyframes cmd-blink {
+  50% { opacity: 0; }
 }
 
 .log-item, .history-item {

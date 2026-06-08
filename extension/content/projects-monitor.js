@@ -8,7 +8,8 @@
 
   const SEEN_KEY = 'fab_seen_projects';
   const RECENT_PROJECTS_API =
-    'https://www.freelancer.com/ajax-api/navigation/recent-projects-and-contests.php?limit=20&compact=true&new_errors=true&new_pools=true';
+    'https://www.freelancer.com/ajax-api/navigation/recent-projects-and-contests.php?limit=50&compact=true&new_errors=true&new_pools=true';
+
   let isMonitoring = false;
   let observer = null;
   let scanIntervalId = null;
@@ -17,8 +18,40 @@
 
   function parseBidCount(text) {
     if (!text) return null;
-    const match = text.match(/(\d+)\s*bids?/i);
-    return match ? parseInt(match[1], 10) : null;
+    const matches = [...text.matchAll(/(\d+)\s*bids?\b/gi)];
+    if (!matches.length) return null;
+    const counts = matches.map((m) => parseInt(m[1], 10)).filter((n) => n < 5000);
+    return counts.length ? counts[counts.length - 1] : null;
+  }
+
+  function parseBudgetInfo(text) {
+    if (!text) return { budget: '', bidType: 'fixed', budgetMinUsd: 0 };
+
+    const hourlyMatch = text.match(/\$\s*([\d,]+(?:\.\d+)?)\s*(?:\/\s*hr|\/hr|per hour)/i);
+    if (hourlyMatch) {
+      const budget = `$${hourlyMatch[1]} / hr`;
+      return { budget, bidType: 'hourly', budgetMinUsd: parseBudgetMinUsd(budget) };
+    }
+
+    const rangeMatch = text.match(/\$\s*([\d,]+(?:\.\d+)?)\s*-\s*\$\s*([\d,]+(?:\.\d+)?)/);
+    if (rangeMatch) {
+      const budget = `$${rangeMatch[1]} - $${rangeMatch[2]}`;
+      return { budget, bidType: 'fixed', budgetMinUsd: parseBudgetMinUsd(budget) };
+    }
+
+    const avgMatch = text.match(/\$\s*([\d,]+(?:\.\d+)?)\s*(?:Average bid|Avg Bid)/i);
+    if (avgMatch) {
+      const budget = `$${avgMatch[1]}`;
+      return { budget, bidType: 'fixed', budgetMinUsd: parseBudgetMinUsd(budget) };
+    }
+
+    const genericMatch = text.match(/\$\s*([\d,]+(?:\.\d+)?)/);
+    if (genericMatch) {
+      const budget = `$${genericMatch[1]}`;
+      return { budget, bidType: 'fixed', budgetMinUsd: parseBudgetMinUsd(budget) };
+    }
+
+    return { budget: '', bidType: 'fixed', budgetMinUsd: 0 };
   }
 
   function parseBudgetMinUsd(budgetText) {
@@ -43,16 +76,18 @@
       '[class*="location"], [class*="Location"], [class*="country"], [class*="Country"], fl-flag'
     );
     const locationText = (locationEl?.textContent || locationEl?.getAttribute('title') || '').trim();
-    if (locationText) return locationText;
+    if (locationText && !/days?\s*left|verified|bid now/i.test(locationText)) return locationText;
 
-    const text = card.textContent || '';
-    const flagMatch = text.match(/(?:from|in|client[:\s]+)\s*([A-Za-z][A-Za-z\s]{2,30})/i);
-    return flagMatch ? flagMatch[1].trim() : '';
+    const localTag = card.textContent.match(/\bLocal\b/);
+    if (localTag) return 'Local';
+
+    return '';
   }
 
   function parseTimeAgo(text) {
     if (!text) return null;
     const lower = text.toLowerCase().trim();
+    if (/days?\s*left|remaining|left to bid/i.test(lower)) return null;
     if (lower.includes('just now')) return 0;
     if (lower.includes('seconds ago') || lower.includes('second ago')) {
       const secMatch = lower.match(/(\d+)\s*seconds?\s*ago/);
@@ -63,44 +98,86 @@
     if (minMatch) return parseInt(minMatch[1], 10) * 60;
     const hourMatch = lower.match(/(\d+)\s*hours?\s*ago/);
     if (hourMatch) return parseInt(hourMatch[1], 10) * 3600;
-    const dayMatch = lower.match(/(\d+)\s*days?\s*ago/);
-    if (dayMatch) return parseInt(dayMatch[1], 10) * 86400;
     return null;
   }
 
+  function findCardParent(el) {
+    let node = el;
+    for (let i = 0; i < 10 && node; i++) {
+      if (node.querySelector?.('a[href*="/projects/"]')) return node;
+      node = node.parentElement;
+    }
+    return el.parentElement;
+  }
+
+  function getProjectCards() {
+    const bidNowEls = Array.from(document.querySelectorAll('a, button, fl-button, [role="button"]'))
+      .filter((el) => /bid\s*now/i.test((el.textContent || '').trim()));
+
+    const cards = [];
+    const seen = new Set();
+    for (const el of bidNowEls) {
+      const card =
+        el.closest(
+          'article, li, fl-project-contest-card, fl-project-card, [class*="JobSearch"], [class*="ProjectCard"], [class*="project-card"]'
+        ) || findCardParent(el);
+      if (card && !seen.has(card)) {
+        seen.add(card);
+        cards.push(card);
+      }
+    }
+
+    if (cards.length) return cards;
+
+    const selectors = [
+      'fl-project-contest-card',
+      'fl-project-card',
+      '[class*="ProjectCard"]',
+      '[class*="project-card"]',
+      '.JobSearchCard-item'
+    ];
+    for (const sel of selectors) {
+      const found = document.querySelectorAll(sel);
+      if (found.length) return Array.from(found);
+    }
+
+    return [];
+  }
+
   function extractProjectFromCard(card) {
-    const titleEl = card.querySelector('a[href*="/projects/"], fl-link[href*="/projects/"] a, .ProjectCard-title a, h2 a, [data-project-id]');
-    const linkEl = card.querySelector('a[href*="/projects/"]') || titleEl;
+    const linkEl =
+      card.querySelector('a[href*="/projects/"]') ||
+      card.querySelector('a[href*="/contest/"]');
     if (!linkEl) return null;
 
     const href = linkEl.getAttribute('href') || '';
-    const projectIdMatch = href.match(/projects\/([^/?#]+)/);
-    const projectId = projectIdMatch ? projectIdMatch[1] : href;
+    const projectIdMatch = href.match(/(?:projects|contest)\/([^/?#]+)/i);
+    const projectId = projectIdMatch ? projectIdMatch[1] : '';
+    if (!projectId) return null;
 
-    const title = (titleEl?.textContent || linkEl.textContent || '').trim();
-    const bidEl = card.querySelector('[class*="bid"], [class*="Bid"], .ProjectCard-bid, fl-text');
-    const bidText = bidEl?.textContent || card.textContent;
-    const bidCount = parseBidCount(bidText);
+    const titleEl =
+      card.querySelector('h2, h3, h4, [class*="title"], [class*="Title"]') || linkEl;
+    const title = (titleEl?.textContent || linkEl.textContent || '').trim().split('\n')[0].trim();
+    if (!title || title.length < 5) return null;
 
-    const timeEl = Array.from(card.querySelectorAll('fl-text, span, small, time')).find((el) =>
-      /ago|just now|seconds|minutes|hours/i.test(el.textContent)
+    const cardText = card.innerText || card.textContent || '';
+    const bidCount = parseBidCount(cardText);
+    const { budget, bidType, budgetMinUsd } = parseBudgetInfo(cardText);
+
+    const timeEl = Array.from(card.querySelectorAll('fl-text, span, small, time, div')).find((el) =>
+      /(?:seconds?|minutes?|hours?)\s*ago|just now/i.test(el.textContent)
     );
     const secondsAgo = parseTimeAgo(timeEl?.textContent || '');
 
-    const budgetEl = card.querySelector('[class*="budget"], [class*="Budget"], [class*="price"]');
-    const budget = budgetEl?.textContent?.trim() || '';
-
     const descEl = card.querySelector('[class*="description"], [class*="Description"], p');
-    const description = descEl?.textContent?.trim() || '';
+    const description = (descEl?.textContent || '').trim();
 
     const skillEls = card.querySelectorAll('[class*="skill"], [class*="Skill"], fl-tag, .Tag');
     const skills = Array.from(skillEls).map((el) => el.textContent.trim()).filter(Boolean);
 
-    const isNda = /nda|ip agreement|sealed/i.test(card.textContent);
-    const isUrgent = /urgent/i.test(card.textContent);
+    const isNda = /\bnda\b|ip agreement|sealed/i.test(cardText);
+    const isUrgent = /urgent/i.test(cardText);
     const clientCountry = extractClientCountry(card);
-    const bidType = /per hour|hourly|\/hr/i.test(budget) ? 'hourly' : 'fixed';
-    const budgetMinUsd = parseBudgetMinUsd(budget);
 
     return {
       projectId,
@@ -116,32 +193,14 @@
       isUrgent,
       clientCountry,
       bidType,
-      detectedAt: Date.now()
+      detectedAt: Date.now(),
+      source: 'dom'
     };
-  }
-
-  function getProjectCards() {
-    const selectors = [
-      'fl-project-contest-card',
-      'fl-project-card',
-      '[class*="ProjectCard"]',
-      '[class*="project-card"]',
-      'article',
-      '.JobSearchCard-item'
-    ];
-    for (const sel of selectors) {
-      const cards = document.querySelectorAll(sel);
-      if (cards.length > 0) return Array.from(cards);
-    }
-    return Array.from(document.querySelectorAll('a[href*="/projects/"]'))
-      .map((a) => a.closest('article, li, div[class*="card"], fl-project-contest-card') || a.parentElement)
-      .filter(Boolean);
   }
 
   function scanProjects() {
     const cards = getProjectCards();
-    const projects = cards.map(extractProjectFromCard).filter((p) => p && p.projectId && p.title);
-    return projects;
+    return cards.map(extractProjectFromCard).filter((p) => p && p.projectId && p.title);
   }
 
   function normalizeApiProject(item) {
@@ -156,12 +215,13 @@
     const currencySign = item.currency?.sign || item.currency_sign || '$';
     const budgetMin = item.budget?.minimum ?? item.minimum_budget ?? item.min_budget;
     const budgetMax = item.budget?.maximum ?? item.maximum_budget ?? item.max_budget;
-    const budgetText = item.budget_text ||
+    const budgetText =
+      item.budget_text ||
       (budgetMin != null
         ? `${currencySign}${budgetMin}${budgetMax != null ? ` - ${currencySign}${budgetMax}` : ''}`
         : '');
 
-    const submittedAt = item.time_submitted || item.submitdate || item.submitted_at;
+    const submittedAt = item.time_submitted || item.submitdate || item.submitted_at || item.time_created;
     const secondsAgo = submittedAt
       ? Math.max(0, Math.floor(Date.now() / 1000 - Number(submittedAt)))
       : null;
@@ -171,14 +231,16 @@
       : 'fixed';
 
     const href = item.url || item.link || `/projects/${projectId}`;
+    const budgetInfo = parseBudgetInfo(budgetText);
+
     return {
       projectId: String(projectId),
       url: href.startsWith('http') ? href : `https://www.freelancer.com${href}`,
       title,
       bidCount: item.bid_count ?? item.bidCount ?? item.bids ?? null,
       secondsAgo,
-      budget: budgetText,
-      budgetMinUsd: parseBudgetMinUsd(budgetText),
+      budget: budgetText || budgetInfo.budget,
+      budgetMinUsd: budgetInfo.budgetMinUsd || parseBudgetMinUsd(budgetText),
       description: (item.description || item.preview_description || '').trim(),
       skills: Array.isArray(item.jobs) ? item.jobs.map((j) => j.name || j).filter(Boolean) : [],
       isNda: !!(item.nda || item.is_sealed || item.sealed),
@@ -194,6 +256,7 @@
     const candidates = [
       data?.result?.projects,
       data?.result?.projects_and_contests,
+      data?.result?.contests,
       data?.result,
       data?.projects,
       data?.projects_and_contests
@@ -217,7 +280,8 @@
     for (const group of groups) {
       for (const project of group) {
         if (!project?.projectId) continue;
-        map.set(project.projectId, { ...map.get(project.projectId), ...project });
+        const existing = map.get(project.projectId);
+        map.set(project.projectId, existing ? { ...existing, ...project } : project);
       }
     }
     return Array.from(map.values());
@@ -246,18 +310,31 @@
     }).catch(() => {});
   }
 
+  function notifyScanResult(stats) {
+    chrome.runtime.sendMessage({
+      type: 'MONITOR_SCAN_RESULT',
+      ...stats,
+      pageUrl: window.location.href
+    }).catch(() => {});
+  }
+
   async function runScan() {
     if (!isMonitoring) return;
 
     const domProjects = scanProjects();
     const apiProjects = await fetchRecentProjectsFromApi().catch(() => []);
     const projects = mergeProjects(domProjects, apiProjects);
-    if (!projects.length) return;
 
     if (!hasSeededSeen) {
       projects.forEach((p) => seenProjectIds.add(p.projectId));
       saveSeenProjects();
       hasSeededSeen = true;
+      notifyScanResult({
+        domCount: domProjects.length,
+        apiCount: apiProjects.length,
+        newCount: 0,
+        seeded: true
+      });
       return;
     }
 
@@ -268,6 +345,13 @@
         newProjects.push(project);
       }
     }
+
+    notifyScanResult({
+      domCount: domProjects.length,
+      apiCount: apiProjects.length,
+      newCount: newProjects.length,
+      seeded: false
+    });
 
     if (newProjects.length) {
       saveSeenProjects();
