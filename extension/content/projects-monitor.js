@@ -549,7 +549,14 @@ async function apiPlaceBid(project, bidData, settings) {
   if (!api?.placeBidViaApi) {
     return { success: false, error: 'api_module_missing' };
   }
-  return api.placeBidViaApi(project, bidData, settings);
+  let resolved = project;
+  if (api.resolveProjectForBid) {
+    resolved = (await api.resolveProjectForBid(project)) || project;
+  } else if (!project.numericProjectId && api.fetchProjectDetails) {
+    const details = await api.fetchProjectDetails(project);
+    if (details) resolved = { ...project, ...details };
+  }
+  return api.placeBidViaApi(resolved, bidData, settings);
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -564,6 +571,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     enrichProject(msg.project).then((project) => sendResponse({ ok: true, project }));
   } else if (msg.type === 'API_PLACE_BID') {
     apiPlaceBid(msg.project, msg.bidData, msg.settings).then(sendResponse);
+  } else if (msg.type === 'GET_SELF_INFO') {
+    const api = window.FabFreelancerApi;
+    const token = msg.oauthToken || msg.settings?.freelancerOAuthToken || '';
+    if (!api?.fetchSelfInfo) {
+      sendResponse({ ok: false });
+      return true;
+    }
+    api.fetchSelfInfo(token).then((info) => sendResponse({ ok: true, info }));
   } else if (msg.type === 'GET_FREELANCER_SESSION') {
     const session = window.FabFreelancerSession?.readSessionSnapshot?.() || null;
     if (session?.viewedNumericIds?.length) {

@@ -276,6 +276,75 @@
     };
   }
 
+  function fillYourNameFields(settings, root) {
+    const name = settings?.fullName?.trim();
+    if (!name) return;
+
+    const fields = (root || document).querySelectorAll(
+      'input[type="text"], input:not([type]), textarea, [contenteditable="true"]'
+    );
+    for (const field of fields) {
+      const ctx = [
+        field.placeholder,
+        field.name,
+        field.id,
+        field.getAttribute('aria-label'),
+        field.getAttribute('data-placeholder'),
+        field.closest('label')?.textContent,
+        field.closest('[class*="field"], [class*="Field"]')?.textContent
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      if (!/your name|full name|freelancer.*name|contractor.*name/.test(ctx)) continue;
+      if (/username|filename|project name|company name/.test(ctx)) continue;
+
+      const current = (field.value || field.textContent || '').trim();
+      if (current && current !== 'Your Name' && current.length > 2 && current !== name) continue;
+
+      if (field.isContentEditable) {
+        field.textContent = name;
+        field.dispatchEvent(new Event('input', { bubbles: true }));
+      } else {
+        setInputValue(field, name);
+      }
+    }
+  }
+
+  async function selectProfile(settings, form) {
+    const wanted = (settings.profileName || 'General').toLowerCase();
+    const profileSelect =
+      findInputByContext(['profile', 'select a profile'], form) ||
+      form.querySelector('select, [class*="profile"] select');
+
+    if (profileSelect?.tagName === 'SELECT') {
+      const options = Array.from(profileSelect.options);
+      const match =
+        options.find((o) => o.textContent.toLowerCase().includes(wanted)) || options[0];
+      if (match) {
+        profileSelect.value = match.value;
+        profileSelect.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+      return;
+    }
+
+    const flSelect = form.querySelector(
+      'fl-select, [class*="profile"] fl-select, [class*="ProfileSelect"], [class*="profile-select"]'
+    );
+    if (!flSelect) return;
+
+    clickElement(flSelect);
+    await sleep(700);
+    const options = document.querySelectorAll(
+      'fl-option, [role="option"], [role="listbox"] *, [class*="option"], [class*="Option"], li, button'
+    );
+    const match = Array.from(options).find((o) => {
+      const text = (o.textContent || '').trim().toLowerCase();
+      return text && (text.includes(wanted) || wanted.includes(text));
+    });
+    if (match) clickElement(match);
+  }
+
   function findInputByContext(keywords, root) {
     const inputs = (root || document).querySelectorAll('input, textarea, select');
     for (const input of inputs) {
@@ -324,17 +393,8 @@
       }
     }
 
-    const profileSelect =
-      findInputByContext(['profile', 'select a profile'], form) ||
-      form.querySelector('select, [class*="profile"] select, fl-select');
-    if (profileSelect && profileSelect.tagName === 'SELECT') {
-      const options = Array.from(profileSelect.options);
-      const match = options.find((o) =>
-        o.textContent.toLowerCase().includes((settings.profileName || 'general').toLowerCase())
-      );
-      if (match) profileSelect.value = match.value;
-      profileSelect.dispatchEvent(new Event('change', { bubbles: true }));
-    }
+    await selectProfile(settings, form);
+    fillYourNameFields(settings, form);
 
     const proposalInput = findProposalInput();
     if (!proposalInput || !bidData.proposal) missing.push('proposal');
@@ -408,6 +468,9 @@
 
     const clickResult = await clickPlaceBid();
     if (!clickResult.success) return clickResult;
+
+    await sleep(1200);
+    fillYourNameFields(settings, document);
 
     if (window.__fabDocumentSigner?.isDocumentSigningPage?.()) {
       const signResult = await window.__fabDocumentSigner.completeDocumentSigning(settings);

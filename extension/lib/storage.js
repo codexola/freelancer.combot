@@ -21,6 +21,8 @@ export const DEFAULT_SETTINGS = {
   profileName: 'General',
   fullName: '',
   fullAddress: '',
+  freelancerProfileId: null,
+  apiOnlyBidding: true,
   signatureStrokes: [],
   portfolioLinks: [],
   portfolioLinksText: '',

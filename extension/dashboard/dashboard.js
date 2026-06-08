@@ -66,6 +66,9 @@ function renderSettings() {
   $('skipExcludedCategories').checked = currentSettings.skipExcludedCategories !== false;
   $('slowNetworkMode').checked = currentSettings.slowNetworkMode !== false;
   $('preferApiBidding').checked = currentSettings.preferApiBidding !== false;
+  if ($('apiOnlyBidding')) {
+    $('apiOnlyBidding').checked = currentSettings.apiOnlyBidding !== false;
+  }
   $('skipUnknownCountry').checked = currentSettings.skipUnknownCountry !== false;
   $('excludedCategoriesInfo').value =
     'マーケティング, 成人コンテンツ, 仮想秘書 (採用・VA・パーソナルアシスタント)';
@@ -136,6 +139,7 @@ function collectSettings() {
     maxBidCount: parseInt($('maxBidCount').value, 10) || 50,
     slowNetworkMode: $('slowNetworkMode').checked,
     preferApiBidding: $('preferApiBidding').checked,
+    apiOnlyBidding: $('apiOnlyBidding')?.checked !== false,
     skipUnknownCountry: $('skipUnknownCountry').checked,
     freelancerOAuthToken: $('freelancerOAuthToken').value,
     fullName: $('fullName').value,
@@ -414,7 +418,7 @@ function setupEventListeners() {
   });
 
   const watchFields = document.querySelectorAll(
-    'input, select, textarea, #autoSignDocuments, #skipNdaProjects, #slowNetworkMode, #preferApiBidding, #skipUnknownCountry, #typeFixed, #typeHourly'
+    'input, select, textarea, #autoSignDocuments, #skipNdaProjects, #slowNetworkMode, #preferApiBidding, #apiOnlyBidding, #skipUnknownCountry, #typeFixed, #typeHourly'
   );
   watchFields.forEach((el) => {
     el.addEventListener('input', onSettingsChange);

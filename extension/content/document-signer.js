@@ -155,15 +155,71 @@
     return true;
   }
 
+  function fillInlineNameAndAddress(settings) {
+    const fullName = settings?.fullName?.trim();
+    const fullAddress = settings?.fullAddress?.trim();
+    const fields = document.querySelectorAll(
+      'input[type="text"], input:not([type]), textarea, [contenteditable="true"], [class*="document"] *'
+    );
+
+    for (const field of fields) {
+      const ctx = [
+        field.placeholder,
+        field.name,
+        field.id,
+        field.getAttribute('aria-label'),
+        field.getAttribute('data-placeholder'),
+        field.closest('label')?.textContent,
+        field.closest('[class*="field"], [class*="Field"]')?.textContent,
+        field.textContent
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+
+      const current = (field.value || field.textContent || '').trim();
+      const isNameField =
+        /your name|full name|freelancer/.test(ctx) && !/username|filename|company/.test(ctx);
+      const isAddressField = /full address|your address|address/.test(ctx) && !/email/.test(ctx);
+
+      if (isNameField && fullName && (!current || current === 'Your Name' || current.length < 3)) {
+        if (field.isContentEditable) {
+          field.textContent = fullName;
+          field.dispatchEvent(new Event('input', { bubbles: true }));
+        } else {
+          setInputValue(field, fullName);
+        }
+      }
+
+      if (isAddressField && fullAddress && (!current || current.length < 5)) {
+        if (field.isContentEditable) {
+          field.textContent = fullAddress;
+          field.dispatchEvent(new Event('input', { bubbles: true }));
+        } else {
+          setInputValue(field, fullAddress);
+        }
+      }
+    }
+  }
+
   async function handleAddFullName(settings) {
+    const fullName = settings?.fullName?.trim();
+    if (!fullName) return false;
+
+    fillInlineNameAndAddress(settings);
+
     if (isStepComplete('full name')) return true;
 
     const addNameBtn =
-      findClickableContaining('+ Add Full Name') || findClickableContaining('Add Full Name');
+      findClickableContaining('+ Add Full Name') ||
+      findClickableContaining('Add Full Name') ||
+      findClickableContaining('Your Name');
     if (addNameBtn) {
       addNameBtn.click();
-      await sleep(800);
+      await sleep(900);
     }
+
+    fillInlineNameAndAddress(settings);
 
     const inputs = document.querySelectorAll('input[type="text"], input:not([type]), textarea');
     for (const input of inputs) {
@@ -178,9 +234,10 @@
         .filter(Boolean)
         .join(' ')
         .toLowerCase();
-      if (!/name/.test(ctx) || /username|filename/.test(ctx)) continue;
-      if (!input.value && settings?.fullName) {
-        setInputValue(input, settings.fullName);
+      if (!/name/.test(ctx) || /username|filename|company/.test(ctx)) continue;
+      const current = (input.value || '').trim();
+      if (!current || current === 'Your Name') {
+        setInputValue(input, fullName);
         await sleep(400);
         const saveBtn =
           findClickableContaining('Save') ||
@@ -256,6 +313,7 @@
 
     const maxAttempts = 8;
     for (let i = 0; i < maxAttempts; i++) {
+      fillInlineNameAndAddress(settings);
       const pending = getPendingItems();
 
       if (pending.includes('signature')) await handleAddSignature(settings);

@@ -188,26 +188,68 @@ function waitForTabLoad(tabId, timeout = OCTO_TAB_LOAD_MS) {
   });
 }
 
-async function syncFreelancerSession(tabId) {
-  const res = await chrome.tabs.sendMessage(tabId, { type: 'GET_FREELANCER_SESSION' }).catch(() => null);
-  if (!res?.session) return null;
+function pickProfileIdFromList(profiles, profileName) {
+  if (!profiles?.length) return null;
+  const wanted = (profileName || 'general').toLowerCase();
+  const match = profiles.find((p) => {
+    const name = (p.name || p.profile_name || p.title || '').toLowerCase();
+    return name.includes(wanted) || wanted.includes(name);
+  });
+  const picked = match || profiles[0];
+  return picked?.id || picked?.profile_id || null;
+}
 
-  const { userId, viewedNumericIds, searchFilters } = res.session;
+function appendNameToProposal(proposal, settings) {
+  const name = settings.fullName?.trim();
+  if (!name || !proposal) return proposal || '';
+  if (proposal.toLowerCase().includes(name.toLowerCase())) {
+    return proposal.slice(0, 1500);
+  }
+  const closing = `\n\nBest regards,\n${name}`;
+  if (proposal.length + closing.length <= 1500) {
+    return proposal + closing;
+  }
+  return proposal.slice(0, Math.max(0, 1500 - closing.length)) + closing;
+}
+
+async function syncFreelancerSession(tabId) {
+  const settings = await getSettings();
+  const res = await chrome.tabs.sendMessage(tabId, { type: 'GET_FREELANCER_SESSION' }).catch(() => null);
+  const infoRes = await chrome.tabs
+    .sendMessage(tabId, {
+      type: 'GET_SELF_INFO',
+      oauthToken: settings.freelancerOAuthToken
+    })
+    .catch(() => null);
+
+  const session = res?.session;
   const settingsPatch = {};
 
+  const userId = session?.userId || infoRes?.info?.userId;
   if (userId) {
     settingsPatch.freelancerUserId = Number(userId);
   }
-  if (searchFilters?.projectLanguages?.length) {
-    settingsPatch.languages = searchFilters.projectLanguages;
+
+  const profiles = infoRes?.info?.profiles || [];
+  const profileId = pickProfileIdFromList(profiles, settings.profileName);
+  if (profileId) {
+    settingsPatch.freelancerProfileId = Number(profileId);
   }
-  if (searchFilters?.projectTypes?.length) {
-    settingsPatch.projectTypes = searchFilters.projectTypes;
+
+  if (session?.searchFilters?.projectLanguages?.length) {
+    settingsPatch.languages = session.searchFilters.projectLanguages;
+  }
+  if (session?.searchFilters?.projectTypes?.length) {
+    settingsPatch.projectTypes = session.searchFilters.projectTypes;
   }
 
   if (Object.keys(settingsPatch).length) {
     await saveSettings(settingsPatch);
   }
+
+  if (!session) return infoRes?.info || null;
+
+  const { viewedNumericIds, searchFilters } = session;
 
   let seeded = 0;
   for (const numericId of viewedNumericIds || []) {
@@ -230,7 +272,7 @@ async function syncFreelancerSession(tabId) {
     });
   }
 
-  return res.session;
+  return session;
 }
 
 async function startBot() {
@@ -600,7 +642,8 @@ function settingsSlowMs() {
   return 45000;
 }
 
-async function executeBidFlow(project, settings) {
+async function executeBidFlow(project, initialSettings) {
+  let settings = initialSettings;
   const startTime = Date.now();
   let tabId = null;
   let proposal = '';
@@ -615,7 +658,14 @@ async function executeBidFlow(project, settings) {
     }
 
     await markProjectProcessed(project.projectId, 'bidding');
-    await recordFilterStatus(project, 'bidding', { message: '入札処理中（API優先）' });
+    if (!settings.fullName?.trim()) {
+      await addBidLog({
+        level: 'warn',
+        message: 'プロフィールの氏名が未設定です。ダッシュボードで fullName を設定してください。',
+        projectId: project.projectId
+      });
+    }
+    await recordFilterStatus(project, 'bidding', { message: '入札処理中（API優先・ブラウザ不要）' });
 
     let projectData = await enrichProjectViaMonitor(project);
     const preFilter = evaluateProjectFilters(projectData, settings);
@@ -641,8 +691,19 @@ async function executeBidFlow(project, settings) {
 
     bidPageUrl = normalizeDetailsUrl(projectData.url || project.url);
 
+    if (monitorTabId) {
+      await syncFreelancerSession(monitorTabId);
+      settings = await getSettings();
+    }
+
+    projectData = await enrichProjectViaMonitor(projectData);
+    if (!projectData.numericProjectId) {
+      projectData = await enrichProjectViaMonitor({ ...projectData, forceEnrich: true });
+    }
+
     try {
       proposal = await generateProposal(settings, projectData);
+      proposal = appendNameToProposal(proposal, settings);
       await saveBidRecord({
         projectId: project.projectId,
         title: project.title,
@@ -675,11 +736,48 @@ async function executeBidFlow(project, settings) {
     let result = null;
     if (settings.preferApiBidding !== false) {
       result = await tryApiBidViaMonitor(projectData, bidData, settings);
+      if (!result?.success && result?.error === 'bidder_id_unavailable' && monitorTabId) {
+        await syncFreelancerSession(monitorTabId);
+        settings = await getSettings();
+        result = await tryApiBidViaMonitor(projectData, bidData, settings);
+      }
+      if (!result?.success && result?.error === 'numeric_project_id_missing') {
+        projectData = await enrichProjectViaMonitor(projectData);
+        result = await tryApiBidViaMonitor(projectData, bidData, settings);
+      }
     } else {
       result = { success: false, error: 'api_disabled' };
     }
 
-    if (!result?.success) {
+    const needsBrowser =
+      result?.needsBrowser ||
+      projectData.isNda ||
+      projectData.requiresDocument ||
+      /document_signing_required|nda|sealed|document|sign|agreement|intellectual property/i.test(
+        String(result?.error || '')
+      );
+
+    const apiOnly = settings.apiOnlyBidding !== false && settings.preferApiBidding !== false;
+
+    if (!result?.success && apiOnly && !needsBrowser) {
+      await recordFilterStatus(project, 'failed', {
+        reason: result?.error || 'api_bid_failed',
+        message: `API入札失敗（ブラウザ未使用）: ${result?.error || 'unknown'}`
+      });
+      await recordBidAttempt({
+        success: false,
+        projectId: project.projectId,
+        title: project.title,
+        url: bidPageUrl,
+        proposal,
+        message: `API入札失敗: ${result?.error || 'unknown'}`,
+        level: 'error'
+      });
+      await markProjectProcessed(project.projectId, 'failed');
+      return;
+    }
+
+    if (!result?.success && (needsBrowser || settings.preferApiBidding === false)) {
       tabId = await ensureBidWorkerTab(bidPageUrl);
 
       const scriptTimeout = slowMode ? 50000 : OCTO_CONTENT_SCRIPT_MS;

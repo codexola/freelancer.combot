@@ -162,6 +162,12 @@
             </label>
           </div>
           <div class="form-group">
+            <label>
+              <input type="checkbox" id="apiOnlyBidding" checked>
+              APIのみ入札（遅い回線向け — 書類署名が必要な案件のみブラウザを開く）
+            </label>
+          </div>
+          <div class="form-group">
             <label>Freelancer OAuth トークン（任意）</label>
             <input type="password" id="freelancerOAuthToken" placeholder="API入札用（未設定時はセッションCookieを使用）">
           </div>
@@ -169,8 +175,9 @@
 
         <div class="tab-content" id="tab-profile">
           <div class="form-group">
-            <label>氏名（契約書用）</label>
+            <label>氏名（契約書・入札文の署名に使用）</label>
             <input type="text" id="fullName" placeholder="Robert Iuoras">
+            <p class="hint">IP Agreement の「Your Name」欄と入札文末尾の署名に自動入力されます。</p>
           </div>
           <div class="form-group">
             <label>住所（契約書用）</label>

@@ -1,5 +1,6 @@
 /**
  * Freelancer.com session/OAuth API — fast bid path without full page render
+ * (Module version — monitor tab uses freelancer-api-content.js)
  */
 
 const API_BASE = 'https://www.freelancer.com/api';
@@ -30,10 +31,8 @@ function pickCountry(owner = {}, project = {}) {
     owner.country,
     owner.location?.country?.name,
     owner.location?.country,
-    owner.timezone?.country,
     project.owner_country,
-    project.country,
-    project.client_country
+    project.country
   ];
   for (const c of candidates) {
     if (typeof c === 'string' && c.trim()) return c.trim();
@@ -42,13 +41,7 @@ function pickCountry(owner = {}, project = {}) {
 }
 
 function pickLanguage(project = {}, owner = {}) {
-  const candidates = [
-    project.language,
-    project.language_code,
-    project.lang,
-    owner.language,
-    owner.preferred_language
-  ];
+  const candidates = [project.language, project.language_code, owner.language];
   for (const c of candidates) {
     if (typeof c === 'string' && c.trim()) return c.trim();
   }
@@ -87,7 +80,14 @@ function normalizeProjectRecord(raw, fallback = {}) {
     skills: Array.isArray(project.jobs)
       ? project.jobs.map((j) => j.name || j).filter(Boolean)
       : fallback.skills || [],
-    isNda: !!(project.nda || project.is_sealed || project.sealed),
+    isNda: !!(project.nda || project.is_sealed || project.sealed || project.is_ndasa),
+    requiresDocument: !!(
+      project.nda ||
+      project.is_sealed ||
+      project.sealed ||
+      project.is_ndasa ||
+      project.frontend_apply_status === 'document_required'
+    ),
     seoUrl: project.seo_url || fallback.projectId
   };
 }
@@ -98,16 +98,13 @@ export async function fetchProjectDetails(project) {
 
   const attempts = [];
   if (numericId) {
-    attempts.push(`${API_BASE}/projects/0.1/projects/${numericId}/?compact=true&job_details=true&user_details=true`);
+    attempts.push(
+      `${API_BASE}/projects/0.1/projects/${numericId}/?compact=true&job_details=true&user_details=true`
+    );
   }
   if (seo && String(seo).includes('/')) {
     attempts.push(
       `${API_BASE}/projects/0.1/projects/?seo_urls[]=${encodeURIComponent(seo)}&compact=true&job_details=true&user_details=true`
-    );
-  }
-  if (seo) {
-    attempts.push(
-      `${API_BASE}/projects/0.1/projects/?project_ids[]=${encodeURIComponent(numericId || seo)}&compact=true&job_details=true&user_details=true`
     );
   }
 
@@ -126,38 +123,78 @@ export async function fetchProjectDetails(project) {
   return null;
 }
 
-export async function fetchSelfUserId(oauthToken) {
+export async function fetchSelfInfo(oauthToken) {
   const headers = oauthToken ? { 'freelancer-oauth-v1': oauthToken } : {};
-  const { ok, data } = await fetchWithSession(`${API_BASE}/users/0.1/self/`, { headers });
+  const { ok, data } = await fetchWithSession(`${API_BASE}/users/0.1/self/?profile_details=true`, {
+    headers
+  });
   if (!ok) return null;
-  return data?.result?.id || data?.result?.user_id || null;
+  const result = data?.result || {};
+  return {
+    userId: result.id || result.user_id || null,
+    displayName: result.display_name || result.public_name || result.username || '',
+    profiles: result.profiles || result.profile_details || []
+  };
+}
+
+export async function fetchSelfUserId(oauthToken) {
+  const info = await fetchSelfInfo(oauthToken);
+  return info?.userId || null;
+}
+
+function pickProfileId(profiles, profileName) {
+  if (!profiles?.length) return null;
+  const wanted = (profileName || 'general').toLowerCase();
+  const match = profiles.find((p) => {
+    const name = (p.name || p.profile_name || p.title || '').toLowerCase();
+    return name.includes(wanted) || wanted.includes(name);
+  });
+  const picked = match || profiles[0];
+  return picked?.id || picked?.profile_id || null;
+}
+
+export async function resolveProjectForBid(project) {
+  if (project.numericProjectId) {
+    const details = await fetchProjectDetails(project);
+    return details ? { ...project, ...details } : project;
+  }
+  const details = await fetchProjectDetails(project);
+  return details ? { ...project, ...details } : project;
 }
 
 export async function placeBidViaApi(project, bidData, settings) {
-  const numericId = project.numericProjectId || project.numericId;
+  const resolved = await resolveProjectForBid(project);
+  const numericId = resolved.numericProjectId || resolved.numericId;
   if (!numericId) {
-    return { success: false, skipped: false, error: 'numeric_project_id_missing' };
+    return { success: false, skipped: false, error: 'numeric_project_id_missing', needsBrowser: false };
+  }
+
+  if (resolved.requiresDocument || resolved.isNda) {
+    return { success: false, needsBrowser: true, error: 'document_signing_required' };
   }
 
   const oauthToken = settings.freelancerOAuthToken?.trim();
   const authHeaders = oauthToken ? { 'freelancer-oauth-v1': oauthToken } : {};
 
   let bidderId = settings.freelancerUserId || null;
-  if (!bidderId) {
-    bidderId = await fetchSelfUserId(oauthToken);
+  let profileId = settings.freelancerProfileId || null;
+  const selfInfo = await fetchSelfInfo(oauthToken);
+  if (!bidderId && selfInfo?.userId) bidderId = selfInfo.userId;
+  if (!profileId && selfInfo?.profiles?.length) {
+    profileId = pickProfileId(selfInfo.profiles, settings.profileName);
   }
   if (!bidderId) {
-    return { success: false, skipped: false, error: 'bidder_id_unavailable' };
+    return { success: false, skipped: false, error: 'bidder_id_unavailable', needsBrowser: false };
   }
 
-  const isHourly = (project.bidType || bidData.bidType) === 'hourly';
+  const isHourly = (resolved.bidType || bidData.bidType) === 'hourly';
   const payload = {
     project_id: Number(numericId),
     bidder_id: Number(bidderId),
     description: String(bidData.proposal || '').slice(0, 1500),
     milestone_percentage: 100
   };
-
+  if (profileId) payload.profile_id = Number(profileId);
   if (isHourly) {
     payload.amount = Number(bidData.hourlyRate || settings.defaultHourlyRate);
   } else {
@@ -175,12 +212,10 @@ export async function placeBidViaApi(project, bidData, settings) {
     return { success: true, message: 'API入札完了', viaApi: true };
   }
 
-  const errMsg =
-    data?.message || data?.error_code || `API bid failed (${status})`;
-
-  if (/nda|sealed|document|sign|agreement|not_authenticated/i.test(errMsg)) {
+  const errMsg = data?.message || data?.error_code || `API bid failed (${status})`;
+  if (/nda|sealed|document|sign|agreement|not_authenticated/i.test(String(errMsg))) {
     return { success: false, needsBrowser: true, error: errMsg };
   }
 
-  return { success: false, skipped: false, error: errMsg };
+  return { success: false, skipped: false, error: errMsg, needsBrowser: false };
 }
