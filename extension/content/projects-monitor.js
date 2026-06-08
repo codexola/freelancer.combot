@@ -7,6 +7,8 @@
   'use strict';
 
   const SEEN_KEY = 'fab_seen_projects';
+  const RECENT_PROJECTS_API =
+    'https://www.freelancer.com/ajax-api/navigation/recent-projects-and-contests.php?limit=20&compact=true&new_errors=true&new_pools=true';
   let isMonitoring = false;
   let observer = null;
   let scanIntervalId = null;
@@ -142,6 +144,85 @@
     return projects;
   }
 
+  function normalizeApiProject(item) {
+    if (!item || typeof item !== 'object') return null;
+
+    const seoUrl = item.seo_url || item.seoUrl || item.slug;
+    const rawId = item.id || item.project_id || item.projectId;
+    const projectId = seoUrl || (rawId != null ? String(rawId) : '');
+    const title = (item.title || item.name || '').trim();
+    if (!projectId || !title) return null;
+
+    const currencySign = item.currency?.sign || item.currency_sign || '$';
+    const budgetMin = item.budget?.minimum ?? item.minimum_budget ?? item.min_budget;
+    const budgetMax = item.budget?.maximum ?? item.maximum_budget ?? item.max_budget;
+    const budgetText = item.budget_text ||
+      (budgetMin != null
+        ? `${currencySign}${budgetMin}${budgetMax != null ? ` - ${currencySign}${budgetMax}` : ''}`
+        : '');
+
+    const submittedAt = item.time_submitted || item.submitdate || item.submitted_at;
+    const secondsAgo = submittedAt
+      ? Math.max(0, Math.floor(Date.now() / 1000 - Number(submittedAt)))
+      : null;
+
+    const bidType = /hourly|per hour/i.test(String(item.type || item.project_type || budgetText))
+      ? 'hourly'
+      : 'fixed';
+
+    const href = item.url || item.link || `/projects/${projectId}`;
+    return {
+      projectId: String(projectId),
+      url: href.startsWith('http') ? href : `https://www.freelancer.com${href}`,
+      title,
+      bidCount: item.bid_count ?? item.bidCount ?? item.bids ?? null,
+      secondsAgo,
+      budget: budgetText,
+      budgetMinUsd: parseBudgetMinUsd(budgetText),
+      description: (item.description || item.preview_description || '').trim(),
+      skills: Array.isArray(item.jobs) ? item.jobs.map((j) => j.name || j).filter(Boolean) : [],
+      isNda: !!(item.nda || item.is_sealed || item.sealed),
+      isUrgent: !!item.urgent,
+      clientCountry: item.owner_country || item.country || item.client_country || '',
+      bidType,
+      detectedAt: Date.now(),
+      source: 'api'
+    };
+  }
+
+  function extractApiProjects(data) {
+    const candidates = [
+      data?.result?.projects,
+      data?.result?.projects_and_contests,
+      data?.result,
+      data?.projects,
+      data?.projects_and_contests
+    ];
+    const items = candidates.find((value) => Array.isArray(value)) || [];
+    return items.map(normalizeApiProject).filter(Boolean);
+  }
+
+  async function fetchRecentProjectsFromApi() {
+    const res = await fetch(RECENT_PROJECTS_API, {
+      credentials: 'include',
+      headers: { Accept: 'application/json' }
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return extractApiProjects(data);
+  }
+
+  function mergeProjects(...groups) {
+    const map = new Map();
+    for (const group of groups) {
+      for (const project of group) {
+        if (!project?.projectId) continue;
+        map.set(project.projectId, { ...map.get(project.projectId), ...project });
+      }
+    }
+    return Array.from(map.values());
+  }
+
   function loadSeenProjects() {
     return new Promise((resolve) => {
       chrome.storage.local.get([SEEN_KEY], (result) => {
@@ -165,9 +246,12 @@
     }).catch(() => {});
   }
 
-  function runScan() {
+  async function runScan() {
     if (!isMonitoring) return;
-    const projects = scanProjects();
+
+    const domProjects = scanProjects();
+    const apiProjects = await fetchRecentProjectsFromApi().catch(() => []);
+    const projects = mergeProjects(domProjects, apiProjects);
     if (!projects.length) return;
 
     if (!hasSeededSeen) {
@@ -197,8 +281,10 @@
     hasSeededSeen = false;
     await loadSeenProjects();
 
-    runScan();
-    observer = new MutationObserver(() => runScan());
+    runScan().catch(() => {});
+    observer = new MutationObserver(() => {
+      runScan().catch(() => {});
+    });
     observer.observe(document.body, { childList: true, subtree: true });
 
     const pollMs = await new Promise((resolve) => {
@@ -207,7 +293,9 @@
       });
     });
     if (scanIntervalId) clearInterval(scanIntervalId);
-    scanIntervalId = setInterval(runScan, pollMs);
+    scanIntervalId = setInterval(() => {
+      runScan().catch(() => {});
+    }, pollMs);
   }
 
   function stopMonitoring() {
@@ -230,8 +318,7 @@
       stopMonitoring();
       sendResponse({ ok: true });
     } else if (msg.type === 'SCAN_PROJECTS') {
-      runScan();
-      sendResponse({ ok: true });
+      runScan().then(() => sendResponse({ ok: true })).catch(() => sendResponse({ ok: false }));
     } else if (msg.type === 'GET_MONITOR_STATUS') {
       sendResponse({ isMonitoring });
     } else if (msg.type === 'PING') {

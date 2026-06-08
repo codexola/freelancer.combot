@@ -10,8 +10,19 @@ import {
 
 let currentSettings = {};
 let currentStats = {};
+let currentFilterStatus = [];
 let autoSaveTimer = null;
 let isDirty = false;
+
+const FILTER_STATUS_LABELS = {
+  passed: '通過',
+  queued: 'キュー',
+  deferred: '待機',
+  bidding: '入札中',
+  skipped: 'スキップ',
+  success: '成功',
+  failed: '失敗'
+};
 
 const $ = (id) => document.getElementById(id);
 
@@ -22,8 +33,10 @@ function sendMessage(type, data = {}) {
 async function loadAll() {
   currentSettings = await sendMessage('GET_SETTINGS');
   currentStats = await sendMessage('GET_STATS');
+  currentFilterStatus = await sendMessage('GET_FILTER_STATUS');
   renderSettings();
   renderStats();
+  renderFilterStatus();
   updateStatusBadge();
 }
 
@@ -102,6 +115,47 @@ function collectSettings() {
     portfolioLinksText,
     portfolioLinks
   };
+}
+
+function renderFilterStatus() {
+  const listEl = $('filterStatusList');
+  if (!listEl) return;
+
+  listEl.innerHTML = '';
+  if (!currentFilterStatus.length) {
+    const empty = document.createElement('div');
+    empty.className = 'filter-status-empty';
+    empty.textContent = 'フィルタリング状況はまだありません。自動入札を開始するとリアルタイムで表示されます。';
+    listEl.appendChild(empty);
+    return;
+  }
+
+  currentFilterStatus.forEach((entry) => {
+    const div = document.createElement('div');
+    div.className = `filter-status-item ${entry.status || 'info'}`;
+    const statusLabel = FILTER_STATUS_LABELS[entry.status] || entry.status || '-';
+    const bidText = entry.bidCount != null ? `${entry.bidCount} bids` : 'bids ?';
+    const sourceText = entry.source === 'api' ? 'API' : '一覧';
+
+    div.innerHTML = `
+      <div class="filter-status-head">
+        <span class="filter-status-time">${formatTime(entry.timestamp)}</span>
+        <span class="filter-status-badge ${escAttr(entry.status)}">${escHtml(statusLabel)}</span>
+        <span class="filter-status-title">${escHtml(entry.title || entry.projectId || '-')}</span>
+      </div>
+      <button class="filter-status-delete" title="この項目を削除" data-entry-id="${escAttr(entry.id)}">×</button>
+      <div class="filter-status-meta">${escHtml(bidText)} · ${escHtml(sourceText)}${entry.reason ? ` · ${escHtml(entry.reason)}` : ''}</div>
+      <div class="filter-status-message">${escHtml(entry.message || '')}</div>
+    `;
+    listEl.appendChild(div);
+  });
+}
+
+function escAttr(str) {
+  return String(str ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;');
 }
 
 function renderStats() {
@@ -229,6 +283,24 @@ function setupEventListeners() {
     showSaveStatus('ログをクリアしました');
   });
 
+  $('btnClearFilterStatus').addEventListener('click', async () => {
+    if (!confirm('フィルタリング状況をすべて削除しますか？')) return;
+    await sendMessage('CLEAR_FILTER_STATUS');
+    currentFilterStatus = [];
+    renderFilterStatus();
+    showSaveStatus('フィルタリング状況を削除しました');
+  });
+
+  $('filterStatusList')?.addEventListener('click', async (event) => {
+    const btn = event.target.closest('.filter-status-delete');
+    if (!btn) return;
+    const entryId = btn.dataset.entryId;
+    if (!entryId) return;
+    const response = await sendMessage('DELETE_FILTER_STATUS_ENTRY', { entryId });
+    currentFilterStatus = response?.filterStatus || [];
+    renderFilterStatus();
+  });
+
   $('portfolioLinksText')?.addEventListener('input', () => {
     updatePortfolioMeta();
     onSettingsChange();
@@ -252,14 +324,30 @@ chrome.runtime.onMessage.addListener((msg) => {
     currentStats = msg.stats;
     renderStats();
   }
+  if (msg.type === 'FILTER_STATUS_UPDATED') {
+    currentFilterStatus = msg.filterStatus || [];
+    renderFilterStatus();
+  }
+});
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local') return;
+  if (changes.filterStatus) {
+    currentFilterStatus = changes.filterStatus.newValue || [];
+    renderFilterStatus();
+  }
+  if (changes.stats) {
+    currentStats = { ...currentStats, ...changes.stats.newValue };
+    renderStats();
+  }
+  if (changes.settings) {
+    currentSettings = { ...currentSettings, ...changes.settings.newValue };
+    updateStatusBadge();
+  }
 });
 
 document.addEventListener('DOMContentLoaded', async () => {
   setupTabs();
   setupEventListeners();
   await loadAll();
-  setInterval(async () => {
-    currentStats = await sendMessage('GET_STATS');
-    renderStats();
-  }, 5000);
 });

@@ -258,9 +258,88 @@ body {
   min-height: 20px;
 }
 
-.log-list, .history-list {
+.log-list, .history-list, .filter-status-list {
   max-height: 300px;
   overflow-y: auto;
+}
+
+.filter-status-list {
+  max-height: 360px;
+}
+
+.filter-status-item {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px 8px;
+  padding: 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.8rem;
+}
+
+.filter-status-item.passed,
+.filter-status-item.queued,
+.filter-status-item.bidding,
+.filter-status-item.deferred { border-left: 3px solid var(--info); }
+.filter-status-item.skipped { border-left: 3px solid var(--warning); }
+.filter-status-item.success { border-left: 3px solid var(--success); }
+.filter-status-item.failed { border-left: 3px solid var(--danger); }
+
+.filter-status-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.filter-status-title {
+  font-weight: 600;
+}
+
+.filter-status-badge {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  background: var(--surface2);
+  color: var(--text-muted);
+}
+
+.filter-status-badge.passed,
+.filter-status-badge.queued,
+.filter-status-badge.bidding,
+.filter-status-badge.deferred { color: var(--info); }
+.filter-status-badge.skipped { color: var(--warning); }
+.filter-status-badge.success { color: var(--success); }
+.filter-status-badge.failed { color: var(--danger); }
+
+.filter-status-meta,
+.filter-status-message {
+  grid-column: 1 / -1;
+  color: var(--text-muted);
+  font-size: 0.74rem;
+}
+
+.filter-status-delete {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.filter-status-delete:hover {
+  color: var(--danger);
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.filter-status-empty {
+  padding: 16px 10px;
+  color: var(--text-muted);
+  font-size: 0.82rem;
 }
 
 .log-item, .history-item {

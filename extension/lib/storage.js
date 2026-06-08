@@ -186,3 +186,42 @@ export async function clearStaleQueuedProjects() {
     await chrome.storage.local.set({ processedProjects: processed });
   }
 }
+
+const FILTER_STATUS_KEY = 'filterStatus';
+const MAX_FILTER_STATUS = 300;
+
+function broadcastFilterStatus(filterStatus) {
+  chrome.runtime.sendMessage({ type: 'FILTER_STATUS_UPDATED', filterStatus }).catch(() => {});
+}
+
+export async function getFilterStatus() {
+  const result = await chrome.storage.local.get([FILTER_STATUS_KEY]);
+  return result[FILTER_STATUS_KEY] || [];
+}
+
+export async function addFilterStatusEntry(entry) {
+  const list = await getFilterStatus();
+  const record = {
+    id: crypto.randomUUID(),
+    timestamp: new Date().toISOString(),
+    ...entry
+  };
+  list.unshift(record);
+  if (list.length > MAX_FILTER_STATUS) list.length = MAX_FILTER_STATUS;
+  await chrome.storage.local.set({ [FILTER_STATUS_KEY]: list });
+  broadcastFilterStatus(list);
+  return record;
+}
+
+export async function clearFilterStatus() {
+  await chrome.storage.local.set({ [FILTER_STATUS_KEY]: [] });
+  broadcastFilterStatus([]);
+}
+
+export async function deleteFilterStatusEntry(entryId) {
+  const list = await getFilterStatus();
+  const filtered = list.filter((entry) => entry.id !== entryId);
+  await chrome.storage.local.set({ [FILTER_STATUS_KEY]: filtered });
+  broadcastFilterStatus(filtered);
+  return filtered;
+}

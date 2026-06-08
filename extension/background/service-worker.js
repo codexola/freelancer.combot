@@ -12,7 +12,11 @@ import {
   getProcessedProjects,
   isProjectInFlight,
   clearStaleQueuedProjects,
-  addBidLog
+  addBidLog,
+  addFilterStatusEntry,
+  getFilterStatus,
+  clearFilterStatus,
+  deleteFilterStatusEntry
 } from '../lib/storage.js';
 import { generateProposal, analyzeProblem } from '../lib/api-clients.js';
 import { solveProblem } from '../lib/problem-solver.js';
@@ -77,6 +81,29 @@ async function stopBot() {
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+async function recordFilterStatus(project, status, details = {}) {
+  const levelMap = {
+    passed: 'info',
+    queued: 'info',
+    deferred: 'info',
+    bidding: 'info',
+    skipped: 'warn',
+    success: 'success',
+    failed: 'error'
+  };
+  await addFilterStatusEntry({
+    projectId: project.projectId,
+    title: project.title || project.projectId,
+    url: project.url,
+    bidCount: project.bidCount,
+    status,
+    reason: details.reason || '',
+    message: details.message || details.reason || status,
+    level: details.level || levelMap[status] || 'info',
+    source: project.source || 'monitor'
+  });
 }
 
 async function waitForContentScript(tabId, timeout = 12000) {
@@ -163,19 +190,7 @@ function schedulePendingRetries() {
         scheduleYoungProjectRetry(item.project, item.settings, retryInMs);
       } else if (reason !== 'already_processed' && reason !== 'already_queued') {
         await markProjectProcessed(item.project.projectId, reason);
-        if (
-          reason?.startsWith('price_below') ||
-          reason?.startsWith('price_above') ||
-          reason?.startsWith('excluded_country') ||
-          reason?.startsWith('excluded_category') ||
-          reason?.startsWith('excluded_type')
-        ) {
-          await addBidLog({
-            level: 'warn',
-            message: `スキップ: ${item.project.title} - ${message || reason}`,
-            projectId: item.project.projectId
-          });
-        }
+        await recordFilterStatus(item.project, 'skipped', { reason, message });
       }
     }
 
@@ -189,6 +204,9 @@ async function enqueueProject(project, settings) {
 
   await markProjectProcessed(project.projectId, 'queued');
   bidQueue.push({ project, settings });
+  await recordFilterStatus(project, 'queued', {
+    message: `入札キューに追加 (${project.bidCount ?? '?'} bids)`
+  });
   await addBidLog({
     level: 'info',
     message: `新規プロジェクト検出: ${project.title} (${project.bidCount ?? '?'} bids)`,
@@ -206,24 +224,14 @@ async function handleDetectedProjects(projects) {
   for (const project of projects) {
     const { pass, reason, message, defer, retryInMs } = await filterProject(project, settings);
     if (pass) {
+      await recordFilterStatus(project, 'passed', { message: 'フィルター通過' });
       await enqueueProject(project, settings);
     } else if (defer && retryInMs) {
+      await recordFilterStatus(project, 'deferred', { reason, message });
       scheduleYoungProjectRetry(project, settings, retryInMs);
     } else if (reason !== 'already_processed' && reason !== 'already_queued') {
       await markProjectProcessed(project.projectId, reason);
-      if (
-        reason?.startsWith('price_below') ||
-        reason?.startsWith('price_above') ||
-        reason?.startsWith('excluded_country') ||
-        reason?.startsWith('excluded_category') ||
-        reason?.startsWith('excluded_type')
-      ) {
-        await addBidLog({
-          level: 'warn',
-          message: `スキップ: ${project.title} - ${message || reason}`,
-          projectId: project.projectId
-        });
-      }
+      await recordFilterStatus(project, 'skipped', { reason, message });
     }
   }
 
@@ -251,6 +259,10 @@ async function executeBidFlow(project, settings) {
     const ageCheck = evaluateAgeWindow(project, settings);
     if (!ageCheck.pass) {
       await markProjectProcessed(project.projectId, ageCheck.reason);
+      await recordFilterStatus(project, 'skipped', {
+        reason: ageCheck.reason,
+        message: ageCheck.message || ageCheck.reason
+      });
       await recordBidAttempt({
         success: false,
         skipped: true,
@@ -263,11 +275,16 @@ async function executeBidFlow(project, settings) {
     }
 
     await markProjectProcessed(project.projectId, 'bidding');
+    await recordFilterStatus(project, 'bidding', { message: '入札処理中' });
     tab = await chrome.tabs.create({ url: project.url, active: false });
     await waitForTabLoad(tab.id);
 
     const scriptReady = await waitForContentScript(tab.id);
     if (!scriptReady) {
+      await recordFilterStatus(project, 'failed', {
+        reason: 'content_script_timeout',
+        message: 'content script通信失敗（タイムアウト）'
+      });
       await recordBidAttempt({
         success: false,
         projectId: project.projectId,
@@ -282,6 +299,10 @@ async function executeBidFlow(project, settings) {
     const bidCountRes = await chrome.tabs.sendMessage(tab.id, { type: 'GET_BID_COUNT' }).catch(() => null);
     if (bidCountRes?.bidCount != null && bidCountRes.bidCount >= settings.maxBidCount) {
       await markProjectProcessed(project.projectId, 'skipped_bid_count');
+      await recordFilterStatus(project, 'skipped', {
+        reason: 'skipped_bid_count',
+        message: `入札者数 ${bidCountRes.bidCount} >= ${settings.maxBidCount}`
+      });
       await recordBidAttempt({
         success: false,
         skipped: true,
@@ -299,6 +320,10 @@ async function executeBidFlow(project, settings) {
     const pageFilter = evaluateProjectFilters(projectData, settings);
     if (!pageFilter.pass) {
       await markProjectProcessed(project.projectId, pageFilter.reason);
+      await recordFilterStatus(project, 'skipped', {
+        reason: pageFilter.reason,
+        message: pageFilter.message || pageFilter.reason
+      });
       await recordBidAttempt({
         success: false,
         skipped: true,
@@ -356,6 +381,10 @@ async function executeBidFlow(project, settings) {
 
     const elapsed = Date.now() - startTime;
     await markProjectProcessed(project.projectId, result?.success ? 'bid_placed' : 'failed');
+    await recordFilterStatus(project, result?.success ? 'success' : result?.skipped ? 'skipped' : 'failed', {
+      reason: result?.reason || result?.error,
+      message: result?.message || result?.error || result?.reason || '完了'
+    });
     await recordBidAttempt({
       success: !!result?.success,
       skipped: !!result?.skipped,
@@ -377,6 +406,10 @@ async function executeBidFlow(project, settings) {
       });
     }
   } catch (err) {
+    await recordFilterStatus(project, 'failed', {
+      reason: 'error',
+      message: err.message
+    });
     await recordBidAttempt({
       success: false,
       projectId: project.projectId,
@@ -511,6 +544,16 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         sendResponse(await handleDetectedProjects(msg.projects || []));
         break;
       }
+      case 'GET_FILTER_STATUS':
+        sendResponse(await getFilterStatus());
+        break;
+      case 'CLEAR_FILTER_STATUS':
+        await clearFilterStatus();
+        sendResponse({ ok: true });
+        break;
+      case 'DELETE_FILTER_STATUS_ENTRY':
+        sendResponse({ ok: true, filterStatus: await deleteFilterStatusEntry(msg.entryId) });
+        break;
       case 'CONTENT_SCRIPT_READY':
         if (msg.page === 'projects-monitor') {
           const s = await getSettings();
