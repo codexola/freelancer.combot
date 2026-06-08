@@ -2,7 +2,11 @@
  * Claude / OpenAI API クライアント
  */
 
-import { detectProjectLanguage, getProposalLanguageInstruction } from './filters.js';
+import {
+  detectProjectLanguage,
+  getProposalLanguageInstruction,
+  analyzeProjectRequirements
+} from './filters.js';
 import {
   getPortfolioLinks,
   selectRelevantLinks,
@@ -51,8 +55,15 @@ function buildProposalPrompt(project, settings) {
 
   const clientLanguage = detectProjectLanguage(project);
   const languageInstruction = getProposalLanguageInstruction(project);
+  const requirementAnalysis = analyzeProjectRequirements(project);
 
   return `You are a freelancer on Freelancer.com. Write a bid proposal for the project below.
+
+## Requirement analysis (read carefully — do NOT assume category from incidental keywords)
+Primary work type: ${requirementAnalysis.primaryType}
+Summary: ${requirementAnalysis.summary}
+Focus your proposal on the client's actual technical/deliverable requirements in the title and description.
+Do NOT write a marketing, VA, or adult-content pitch unless that is clearly the primary job.
 
 ## Constraints
 - The ENTIRE proposal including any portfolio URLs must be ${MAX_PROPOSAL_LENGTH} characters or fewer (strict)

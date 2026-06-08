@@ -22,7 +22,12 @@ import {
 } from '../lib/storage.js';
 import { generateProposal, analyzeProblem } from '../lib/api-clients.js';
 import { solveProblem } from '../lib/problem-solver.js';
-import { evaluateProjectFilters, evaluateAgeWindow, detectProjectLanguage } from '../lib/filters.js';
+import {
+  evaluateProjectFilters,
+  evaluateAgeWindow,
+  detectProjectLanguage,
+  analyzeProjectRequirements
+} from '../lib/filters.js';
 import { finalizeProposal } from '../lib/portfolio.js';
 
 const PROJECTS_URL = 'https://www.freelancer.com/search/projects?projectSort=latest';
@@ -164,17 +169,19 @@ async function filterProject(project, settings) {
     return { pass: false, reason: 'nda_project' };
   }
 
+  const requirementAnalysis = analyzeProjectRequirements(project);
   const filterResult = evaluateProjectFilters(project, settings);
   if (!filterResult.pass) {
     return {
       pass: false,
       reason: filterResult.reason,
       message: filterResult.message,
-      skipped: true
+      skipped: true,
+      requirementAnalysis: filterResult.requirementAnalysis || requirementAnalysis
     };
   }
 
-  return { pass: true };
+  return { pass: true, requirementAnalysis: filterResult.requirementAnalysis || requirementAnalysis };
 }
 
 function scheduleYoungProjectRetry(project, settings, retryInMs) {
@@ -202,14 +209,22 @@ function schedulePendingRetries() {
     }
 
     for (const item of ready) {
-      const { pass, reason, message, defer, retryInMs } = await filterProject(item.project, item.settings);
+      const { pass, reason, message, defer, retryInMs, requirementAnalysis } = await filterProject(
+        item.project,
+        item.settings
+      );
+      const reqMsg = requirementAnalysis?.summary || '';
       if (pass) {
+        await recordFilterStatus(item.project, 'passed', { message: `フィルター通過 — ${reqMsg}` });
         await enqueueProject(item.project, item.settings);
       } else if (defer && retryInMs) {
+        await recordFilterStatus(item.project, 'deferred', { reason, message: `${message} — ${reqMsg}` });
         scheduleYoungProjectRetry(item.project, item.settings, retryInMs);
-      } else if (reason !== 'already_processed' && reason !== 'already_queued') {
-        await markProjectProcessed(item.project.projectId, reason);
-        await recordFilterStatus(item.project, 'skipped', { reason, message });
+      } else {
+        await recordFilterStatus(item.project, 'skipped', { reason, message: message || reason });
+        if (reason !== 'already_processed' && reason !== 'already_queued') {
+          await markProjectProcessed(item.project.projectId, reason);
+        }
       }
     }
 
@@ -241,19 +256,29 @@ async function handleDetectedProjects(projects) {
   await clearStaleQueuedProjects();
 
   for (const project of projects) {
+    const reqPreview = analyzeProjectRequirements(project);
     await recordFilterStatus(project, 'detected', {
-      message: `新規検出 [${project.source || 'monitor'}] ${project.budget || 'budget?'} / ${project.bidCount ?? '?'} bids`
+      message: `新規検出 [${project.source || 'monitor'}] ${project.budget || 'budget?'} / ${project.bidCount ?? '?'} bids — ${reqPreview.summary}`
     });
-    const { pass, reason, message, defer, retryInMs } = await filterProject(project, settings);
+
+    const { pass, reason, message, defer, retryInMs, requirementAnalysis } = await filterProject(project, settings);
+    const reqMsg = requirementAnalysis?.summary || reqPreview.summary;
+
     if (pass) {
-      await recordFilterStatus(project, 'passed', { message: 'フィルター通過' });
+      await recordFilterStatus(project, 'passed', { message: `フィルター通過 — ${reqMsg}` });
       await enqueueProject(project, settings);
     } else if (defer && retryInMs) {
-      await recordFilterStatus(project, 'deferred', { reason, message });
+      await recordFilterStatus(project, 'deferred', { reason, message: `${message} — ${reqMsg}` });
       scheduleYoungProjectRetry(project, settings, retryInMs);
-    } else if (reason !== 'already_processed' && reason !== 'already_queued') {
-      await markProjectProcessed(project.projectId, reason);
-      await recordFilterStatus(project, 'skipped', { reason, message });
+    } else {
+      await recordFilterStatus(project, 'skipped', {
+        reason,
+        message: message || reason || 'filtered out',
+        level: reason === 'already_processed' || reason === 'already_queued' ? 'info' : 'warn'
+      });
+      if (reason !== 'already_processed' && reason !== 'already_queued') {
+        await markProjectProcessed(project.projectId, reason);
+      }
     }
   }
 
@@ -278,24 +303,6 @@ async function executeBidFlow(project, settings) {
   let tab = null;
 
   try {
-    const ageCheck = evaluateAgeWindow(project, settings);
-    if (!ageCheck.pass) {
-      await markProjectProcessed(project.projectId, ageCheck.reason);
-      await recordFilterStatus(project, 'skipped', {
-        reason: ageCheck.reason,
-        message: ageCheck.message || ageCheck.reason
-      });
-      await recordBidAttempt({
-        success: false,
-        skipped: true,
-        projectId: project.projectId,
-        title: project.title,
-        message: ageCheck.message || ageCheck.reason,
-        level: 'warn'
-      });
-      return;
-    }
-
     await markProjectProcessed(project.projectId, 'bidding');
     await recordFilterStatus(project, 'bidding', { message: '入札処理中' });
     tab = await chrome.tabs.create({ url: project.url, active: false });

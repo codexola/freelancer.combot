@@ -7,7 +7,7 @@ export const DEFAULT_SETTINGS = {
   isRunning: false,
   maxBidCount: 50,
   bidWindowMinSec: 3,
-  bidWindowMaxSec: 10,
+  bidWindowMaxSec: 120,
   pollIntervalMs: 2000,
   defaultBidAmount: 500,
   defaultDeliveryDays: 7,

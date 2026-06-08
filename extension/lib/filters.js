@@ -251,25 +251,113 @@ export function getProjectSearchText(project) {
     .toLowerCase();
 }
 
-export function detectExcludedCategory(project, rules = EXCLUDED_CATEGORY_RULES) {
-  const text = getProjectSearchText(project);
+/** Title + opening description only — skills/tags often mention marketing tangentially */
+export function getCategoryAnalysisText(project) {
+  const title = (project.title || '').trim();
+  const desc = (project.description || '').trim().slice(0, 600);
+  return { title: title.toLowerCase(), text: `${title}\n${desc}`.toLowerCase(), titleRaw: title };
+}
 
-  for (const rule of rules) {
-    for (const keyword of rule.keywords) {
-      const normalized = keyword.toLowerCase().trim();
-      if (!normalized) continue;
+const MARKETING_PRIMARY_PATTERNS = [
+  /\b(?:social\s+media|digital|email|content|influencer|affiliate)\s+marketing\b/i,
+  /\bmarketing\s+(?:manager|specialist|expert|consultant|campaign|strategy)\b/i,
+  /\b(?:facebook|google|instagram|tiktok)\s+ads?\b/i,
+  /\b(?:ppc|smm|seo)\s+(?:campaign|specialist|manager|expert)\b/i,
+  /\blead\s+generation\s+(?:campaign|specialist|manager)\b/i,
+  /\b(?:brand\s+awareness|media\s+buying|growth\s+hacking)\s+(?:campaign|strategy)\b/i,
+  /\b(?:promotion|advertising)\s+campaign\b/i,
+  /\bマーケティング(?:担当|専門|施策|運用)\b/i
+];
 
-      if (normalized.includes(' ')) {
-        if (text.includes(normalized)) return rule;
-        continue;
-      }
+const VA_RECRUITMENT_PATTERNS = [
+  /\b(?:need|looking\s+for|hire|hiring|seeking|want)\s+(?:an?\s+)?virtual\s+assistant\b/i,
+  /\bvirtual\s+assistant\s+(?:needed|wanted|required|position|job)\b/i,
+  /\b(?:need|looking\s+for|hire|hiring)\s+(?:an?\s+)?(?:personal|executive|administrative|online|remote)\s+assistant\b/i,
+  /\bva\s+(?:needed|wanted|required|position)\b/i,
+  /\b仮想秘書|バーチャルアシスタント|オンライン秘書|リモート秘書/i
+];
 
-      const pattern = new RegExp(`\\b${escapeRegExp(normalized)}\\b`, 'i');
-      if (pattern.test(text)) return rule;
-    }
+const ADULT_PRIMARY_PATTERNS = [
+  /\badult\s+(?:content|website|site|video|entertainment|chat)\b/i,
+  /\b(?:porn|pornograph|xxx|nsfw|onlyfans|webcam\s+model|cam\s+girl|cam\s+site)\b/i,
+  /\b(?:erotic|escort|nude|nudity|sex\s+site|sex\s+chat|18\+|x-?rated)\b/i,
+  /\b成人(?:向け|コンテンツ|サイト)?|アダルト|エロ|風俗/i
+];
+
+function matchesAnyPattern(text, patterns) {
+  return patterns.some((p) => p.test(text));
+}
+
+function isMarketingPrimaryProject(title, text) {
+  if (matchesAnyPattern(title, MARKETING_PRIMARY_PATTERNS)) return true;
+  const opening = text.slice(0, 350);
+  if (matchesAnyPattern(opening, MARKETING_PRIMARY_PATTERNS)) return true;
+  if (/\b(?:i\s+need|we\s+need|looking\s+for)\s+.*\bmarketing\b/i.test(opening)) return true;
+  if (/\bsocial\s+media\b/i.test(title) && /\b(?:lead\s+gen|marketing|campaign|management|posts|ads)\b/i.test(title)) {
+    return true;
+  }
+  if (/\b(?:seo|ppc|google\s+ads|facebook\s+ads)\b/i.test(title) && /\b(?:traffic|ranking|campaign|specialist)\b/i.test(title)) {
+    return true;
+  }
+  return false;
+}
+
+function isVaRecruitmentProject(title, text) {
+  if (matchesAnyPattern(title, VA_RECRUITMENT_PATTERNS)) return true;
+  const opening = text.slice(0, 400);
+  return matchesAnyPattern(opening, VA_RECRUITMENT_PATTERNS);
+}
+
+function isAdultContentProject(title, text) {
+  if (matchesAnyPattern(title, ADULT_PRIMARY_PATTERNS)) return true;
+  return matchesAnyPattern(text.slice(0, 400), ADULT_PRIMARY_PATTERNS);
+}
+
+export function analyzeProjectRequirements(project) {
+  const { title, text, titleRaw } = getCategoryAnalysisText(project);
+  const analysis = {
+    title: titleRaw,
+    primaryType: 'general',
+    excludedCategory: null,
+    summary: ''
+  };
+
+  if (isAdultContentProject(title, text)) {
+    analysis.primaryType = 'adult';
+    analysis.excludedCategory = EXCLUDED_CATEGORY_RULES.find((r) => r.id === 'adult');
+    analysis.summary = 'Primary requirement: adult content project';
+    return analysis;
+  }
+  if (isVaRecruitmentProject(title, text)) {
+    analysis.primaryType = 'virtual_assistant';
+    analysis.excludedCategory = EXCLUDED_CATEGORY_RULES.find((r) => r.id === 'virtual_assistant');
+    analysis.summary = 'Primary requirement: virtual assistant recruitment';
+    return analysis;
+  }
+  if (isMarketingPrimaryProject(title, text)) {
+    analysis.primaryType = 'marketing';
+    analysis.excludedCategory = EXCLUDED_CATEGORY_RULES.find((r) => r.id === 'marketing');
+    analysis.summary = 'Primary requirement: marketing-focused project';
+    return analysis;
   }
 
-  return null;
+  if (/\b(?:develop|build|create|design|implement|fix|migrate|integrate)\b/i.test(text)) {
+    analysis.primaryType = 'development';
+    analysis.summary = 'Primary requirement: development/technical work';
+  } else if (/\b(?:write|content|article|blog|copy)\b/i.test(text)) {
+    analysis.primaryType = 'content';
+    analysis.summary = 'Primary requirement: content/writing work';
+  } else {
+    analysis.summary = 'Primary requirement: general freelance work';
+  }
+  return analysis;
+}
+
+export function detectExcludedCategory(project, rules = EXCLUDED_CATEGORY_RULES) {
+  const analysis = analyzeProjectRequirements(project);
+  if (!analysis.excludedCategory) return null;
+  const rule = rules.find((r) => r.id === analysis.excludedCategory.id);
+  return rule || analysis.excludedCategory;
 }
 
 function escapeRegExp(value) {
@@ -297,23 +385,27 @@ export function evaluateProjectFilters(project, settings) {
     };
   }
 
+  const requirementAnalysis = analyzeProjectRequirements(project);
+
   const excludedCategory = isExcludedCategory(project, settings);
   if (excludedCategory) {
     return {
       pass: false,
       reason: `excluded_category_${excludedCategory.id}`,
-      message: `除外カテゴリ: ${excludedCategory.label}`
+      message: `除外カテゴリ: ${excludedCategory.label} — ${requirementAnalysis.summary}`,
+      requirementAnalysis
     };
   }
 
   const parsed = parseBudgetUsd(project.budget, bidType);
   const effectiveMinUsd = Math.max(parsed.minUsd, project.budgetMinUsd || 0);
 
-  if (effectiveMinUsd < minPriceUsd) {
+  if (effectiveMinUsd > 0 && effectiveMinUsd < minPriceUsd) {
     return {
       pass: false,
       reason: `price_below_min_${effectiveMinUsd.toFixed(0)}usd`,
-      message: `価格が最低$${minPriceUsd}未満 (推定$${effectiveMinUsd.toFixed(0)})`
+      message: `価格が最低$${minPriceUsd}未満 (推定$${effectiveMinUsd.toFixed(0)})`,
+      requirementAnalysis
     };
   }
 
@@ -334,7 +426,7 @@ export function evaluateProjectFilters(project, settings) {
     };
   }
 
-  return { pass: true };
+  return { pass: true, requirementAnalysis };
 }
 
 export function getProjectAgeSeconds(project) {
@@ -357,6 +449,9 @@ export function evaluateAgeWindow(project, settings) {
   const ageSec = getProjectAgeSeconds(project);
 
   if (ageSec == null) {
+    if (project.detectedAt) {
+      return { pass: true, ageSec: 0, usedDetectionTime: true };
+    }
     return { pass: false, reason: 'age_unknown', message: '投稿時刻を判定できません', defer: false };
   }
   if (ageSec < minAge) {
