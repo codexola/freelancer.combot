@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="popup">
+    <div class="popup-header">
+      <h2>Auto Bid</h2>
+      <span class="status-dot" id="statusDot"></span>
+    </div>
+    <div class="quick-stats">
+      <div class="qs-item">
+        <span class="qs-val" id="qsToday">0</span>
+        <span class="qs-label">本日</span>
+      </div>
+      <div class="qs-item">
+        <span class="qs-val" id="qsTotal">0</span>
+        <span class="qs-label">総計</span>
+      </div>
+      <div class="qs-item">
+        <span class="qs-val" id="qsSuccess">0</span>
+        <span class="qs-label">成功</span>
+      </div>
+    </div>
+    <div class="popup-actions">
+      <button class="btn start" id="btnQuickStart">開始</button>
+      <button class="btn stop" id="btnQuickStop">停止</button>
+    </div>
+    <button class="btn dashboard" id="btnDashboard">ダッシュボードを開く</button>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,85 @@
+body {
+  width: 260px;
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: #1a1d27;
+  color: #e8eaef;
+}
+
+.popup {
+  padding: 16px;
+}
+
+.popup-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.popup-header h2 {
+  font-size: 1rem;
+  margin: 0;
+}
+
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #ef4444;
+}
+
+.status-dot.running {
+  background: #22c55e;
+  box-shadow: 0 0 6px #22c55e;
+}
+
+.quick-stats {
+  display: flex;
+  justify-content: space-around;
+  margin-bottom: 14px;
+  padding: 10px;
+  background: #0f1117;
+  border-radius: 8px;
+}
+
+.qs-item {
+  text-align: center;
+}
+
+.qs-val {
+  display: block;
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: #e91e8c;
+}
+
+.qs-label {
+  font-size: 0.65rem;
+  color: #8b92a8;
+}
+
+.popup-actions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.btn {
+  flex: 1;
+  padding: 8px;
+  border: none;
+  border-radius: 8px;
+  font-weight: 600;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.btn.start { background: #22c55e; color: white; }
+.btn.stop { background: #ef4444; color: white; }
+.btn.dashboard {
+  width: 100%;
+  background: #242836;
+  color: #e8eaef;
+  border: 1px solid #2e3348;
+}

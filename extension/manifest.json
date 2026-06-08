@@ -1,0 +1,55 @@
+{
+  "manifest_version": 3,
+  "name": "Freelancer Auto Bid",
+  "version": "1.0.0",
+  "description": "Freelancer.comの新規プロジェクトを監視し、自動入札を行う拡張機能",
+  "permissions": [
+    "storage",
+    "tabs",
+    "activeTab",
+    "scripting",
+    "alarms",
+    "notifications"
+  ],
+  "host_permissions": [
+    "https://www.freelancer.com/*",
+    "https://api.anthropic.com/*",
+    "https://api.openai.com/*"
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+  "options_page": "dashboard/dashboard.html",
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.freelancer.com/search/projects*"],
+      "js": ["content/projects-monitor.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://www.freelancer.com/projects/*"],
+      "js": ["content/bid-handler.js", "content/document-signer.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["dashboard/dashboard.html"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

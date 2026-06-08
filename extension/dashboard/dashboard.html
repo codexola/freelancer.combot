@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Freelancer Auto Bid - Dashboard</title>
+  <link rel="stylesheet" href="dashboard.css">
+</head>
+<body>
+  <div class="app">
+    <header class="header">
+      <div class="header-left">
+        <h1>Freelancer Auto Bid</h1>
+        <span class="status-badge" id="statusBadge">停止中</span>
+      </div>
+      <div class="header-actions">
+        <button class="btn btn-success" id="btnStart">開始</button>
+        <button class="btn btn-danger" id="btnStop">停止</button>
+      </div>
+    </header>
+
+    <section class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-value" id="statTotalBids">0</div>
+        <div class="stat-label">総入札数</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value" id="statTodayBids">0</div>
+        <div class="stat-label">本日の入札数</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value" id="statSuccess">0</div>
+        <div class="stat-label">成功</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value" id="statFailed">0</div>
+        <div class="stat-label">失敗</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value" id="statSkipped">0</div>
+        <div class="stat-label">スキップ</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value" id="statLastBid">-</div>
+        <div class="stat-label">最終入札</div>
+      </div>
+    </section>
+
+    <div class="main-grid">
+      <section class="panel settings-panel">
+        <div class="panel-header">
+          <h2>設定</h2>
+          <div class="panel-actions">
+            <button class="btn btn-primary btn-sm" id="btnSave">保管</button>
+            <button class="btn btn-secondary btn-sm" id="btnChange">変更を適用</button>
+            <button class="btn btn-warning btn-sm" id="btnDelete">削除</button>
+          </div>
+        </div>
+
+        <div class="tabs">
+          <button class="tab active" data-tab="api">API</button>
+          <button class="tab" data-tab="bid">入札</button>
+          <button class="tab" data-tab="profile">プロフィール</button>
+          <button class="tab" data-tab="portfolio">ポートフォリオ</button>
+          <button class="tab" data-tab="filter">フィルター</button>
+        </div>
+
+        <div class="tab-content active" id="tab-api">
+          <div class="form-group">
+            <label>AIプロバイダー</label>
+            <select id="preferredAiProvider">
+              <option value="claude">Claude</option>
+              <option value="openai">OpenAI</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Claude API Key</label>
+            <input type="password" id="claudeApiKey" placeholder="sk-ant-...">
+          </div>
+          <div class="form-group">
+            <label>OpenAI API Key</label>
+            <input type="password" id="openaiApiKey" placeholder="sk-...">
+          </div>
+          <div class="form-group">
+            <label>入札文スタイル</label>
+            <select id="proposalStyle">
+              <option value="professional">Professional</option>
+              <option value="friendly">Friendly</option>
+              <option value="technical">Technical</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="tab-content" id="tab-bid">
+          <div class="form-row">
+            <div class="form-group">
+              <label>固定価格入札額</label>
+              <input type="number" id="defaultBidAmount" min="1">
+            </div>
+            <div class="form-group">
+              <label>納期（日）</label>
+              <input type="number" id="defaultDeliveryDays" min="1">
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>時給（Hourly）</label>
+              <input type="number" id="defaultHourlyRate" min="1">
+            </div>
+            <div class="form-group">
+              <label>プロフィール名</label>
+              <input type="text" id="profileName" placeholder="General">
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>入札時間窓 最小（秒）</label>
+              <input type="number" id="bidWindowMinSec" min="1" max="60">
+            </div>
+            <div class="form-group">
+              <label>入札時間窓 最大（秒）</label>
+              <input type="number" id="bidWindowMaxSec" min="1" max="120">
+            </div>
+          </div>
+          <div class="form-group">
+            <label>最大入札者数（超過時スキップ）</label>
+            <input type="number" id="maxBidCount" min="1" value="50">
+          </div>
+        </div>
+
+        <div class="tab-content" id="tab-profile">
+          <div class="form-group">
+            <label>氏名（契約書用）</label>
+            <input type="text" id="fullName" placeholder="Robert Iuoras">
+          </div>
+          <div class="form-group">
+            <label>住所（契約書用）</label>
+            <textarea id="fullAddress" rows="3" placeholder="Full address"></textarea>
+          </div>
+          <div class="form-group">
+            <label>
+              <input type="checkbox" id="autoSignDocuments" checked>
+              契約書を自動署名
+            </label>
+          </div>
+          <div class="form-group">
+            <label>
+              <input type="checkbox" id="skipNdaProjects">
+              NDA/IP Agreementプロジェクトをスキップ
+            </label>
+          </div>
+        </div>
+
+        <div class="tab-content" id="tab-portfolio">
+          <p class="hint">顧客の要求に最も適したリンクのみ入札文に含まれます。タグで関連性を指定してください。</p>
+          <div id="portfolioList"></div>
+          <button class="btn btn-secondary btn-sm" id="btnAddPortfolio">+ リンク追加</button>
+        </div>
+
+        <div class="tab-content" id="tab-filter">
+          <div class="form-group">
+            <label>最低価格 (USD)</label>
+            <input type="number" id="minPriceUsd" min="100" value="100">
+            <p class="hint">$100未満のプロジェクトには入札しません。時給案件は時給×40時間で換算します。</p>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>最大予算 (USD)</label>
+              <input type="number" id="maxBudget" min="0">
+            </div>
+          </div>
+          <div class="form-group">
+            <label>入札文の言語</label>
+            <p class="hint">標準は英語。クライアントがプロジェクト広告で使用している言語で自動生成します。</p>
+          </div>
+          <div class="form-group">
+            <label>除外クライアント国</label>
+            <p class="hint">インド・パキスタン・アフリカ諸国のプロジェクトには入札しません。</p>
+            <textarea id="excludedCountries" rows="4" readonly></textarea>
+          </div>
+          <div class="form-group">
+            <label>プロジェクトタイプ</label>
+            <label class="checkbox-label"><input type="checkbox" id="typeFixed" checked> 固定価格</label>
+            <label class="checkbox-label"><input type="checkbox" id="typeHourly" checked> 時給</label>
+          </div>
+        </div>
+
+        <div class="save-status" id="saveStatus"></div>
+      </section>
+
+      <section class="panel logs-panel">
+        <div class="panel-header">
+          <h2>入札ログ</h2>
+          <button class="btn btn-secondary btn-sm" id="btnClearLogs">ログクリア</button>
+        </div>
+        <div class="log-list" id="logList"></div>
+        <div class="panel-header" style="margin-top:16px">
+          <h2>入札履歴</h2>
+        </div>
+        <div class="history-list" id="historyList"></div>
+      </section>
+    </div>
+  </div>
+  <script src="dashboard.js" type="module"></script>
+</body>
+</html>
