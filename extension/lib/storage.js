@@ -49,7 +49,7 @@ export const DEFAULT_SETTINGS = {
     'uganda', 'zambia', 'zimbabwe'
   ],
   projectTypes: ['fixed', 'hourly'],
-  languages: ['en'],
+  languages: ['en', 'es', 'pt', 'zh'],
   lastUpdated: null
 };
 

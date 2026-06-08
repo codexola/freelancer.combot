@@ -52,6 +52,7 @@ let lastScanLog = { at: 0, signature: '' };
 const MONITOR_SCRIPT_FILES = [
   'lib/project-url-content.js',
   'lib/freelancer-api-content.js',
+  'lib/freelancer-session-content.js',
   'content/projects-monitor.js'
 ];
 let bidWorkerTabId = null;
@@ -169,6 +170,51 @@ function waitForTabLoad(tabId, timeout = OCTO_TAB_LOAD_MS) {
   });
 }
 
+async function syncFreelancerSession(tabId) {
+  const res = await chrome.tabs.sendMessage(tabId, { type: 'GET_FREELANCER_SESSION' }).catch(() => null);
+  if (!res?.session) return null;
+
+  const { userId, viewedNumericIds, searchFilters } = res.session;
+  const settingsPatch = {};
+
+  if (userId) {
+    settingsPatch.freelancerUserId = Number(userId);
+  }
+  if (searchFilters?.projectLanguages?.length) {
+    settingsPatch.languages = searchFilters.projectLanguages;
+  }
+  if (searchFilters?.projectTypes?.length) {
+    settingsPatch.projectTypes = searchFilters.projectTypes;
+  }
+
+  if (Object.keys(settingsPatch).length) {
+    await saveSettings(settingsPatch);
+  }
+
+  let seeded = 0;
+  for (const numericId of viewedNumericIds || []) {
+    await saveProjectArchiveEntry(String(numericId), {
+      title: `viewed-${numericId}`,
+      status: 'viewed_freelancer',
+      numericProjectId: Number(numericId),
+      source: 'freelancer_localStorage'
+    });
+    await markProjectProcessed(String(numericId), 'viewed_freelancer');
+    seeded++;
+  }
+
+  if (userId || seeded) {
+    await addFilterStatusEntry({
+      status: 'system',
+      level: 'info',
+      title: 'SESSION',
+      message: `Freelancer session: user ${userId || '?'} | viewed ${seeded} projects | langs ${(searchFilters?.projectLanguages || []).join(',') || '-'}`
+    });
+  }
+
+  return res.session;
+}
+
 async function startBot() {
   await saveSettings({ isRunning: true });
   await addFilterStatusEntry({
@@ -178,6 +224,7 @@ async function startBot() {
     title: 'SYSTEM'
   });
   const tabId = await ensureMonitorTab();
+  await syncFreelancerSession(tabId);
   await startMonitoringOnTab(tabId);
   await addBidLog({ level: 'info', message: '自動入札を開始しました', status: 'started' });
   chrome.alarms.create('poll_projects', { periodInMinutes: 1 });
@@ -483,7 +530,10 @@ async function handleDetectedProjects(projects, { seedBaseline = false } = {}) {
 
   let queued = 0;
   for (const project of sorted) {
-    const archived = await isProjectArchived(project.projectId);
+    const archived =
+      (await isProjectArchived(project.projectId)) ||
+      (project.numericProjectId != null &&
+        (await isProjectArchived(String(project.numericProjectId))));
     if (archived) continue;
 
     const result = await processProjectThroughPipeline(project, settings, { isNew: true });

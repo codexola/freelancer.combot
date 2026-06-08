@@ -37,7 +37,7 @@
   "content_scripts": [
     {
       "matches": ["https://www.freelancer.com/search/projects*"],
-      "js": ["lib/project-url-content.js", "lib/freelancer-api-content.js", "content/projects-monitor.js"],
+      "js": ["lib/project-url-content.js", "lib/freelancer-api-content.js", "lib/freelancer-session-content.js", "content/projects-monitor.js"],
       "run_at": "document_idle"
     },
     {

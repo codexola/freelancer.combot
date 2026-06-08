@@ -99,6 +99,24 @@ const CURRENCY_TO_USD = {
   PEN: 0.27
 };
 
+const LANG_NAME_TO_CODE = {
+  English: 'en',
+  Spanish: 'es',
+  Portuguese: 'pt',
+  Chinese: 'zh',
+  French: 'fr',
+  German: 'de',
+  Italian: 'it',
+  Dutch: 'nl',
+  Russian: 'ru',
+  Japanese: 'ja',
+  Korean: 'ko',
+  Arabic: 'ar',
+  Hindi: 'hi',
+  Turkish: 'tr',
+  Polish: 'pl'
+};
+
 const LANGUAGE_MAP = {
   en: 'English', english: 'English',
   es: 'Spanish', spanish: 'Spanish', español: 'Spanish',
@@ -398,12 +416,44 @@ export function isExcludedCategory(project, settings) {
   return detectExcludedCategory(project, rules);
 }
 
+export function evaluateLanguageFilter(project, settings) {
+  const allowed = settings.languages || [];
+  if (!allowed.length) return { pass: true };
+
+  const langName = detectProjectLanguage(project);
+  const code =
+    LANG_NAME_TO_CODE[langName] ||
+    langName.toLowerCase().slice(0, 2) ||
+    project.projectLanguage ||
+    project.language ||
+    '';
+
+  const normalized = String(code).toLowerCase();
+  const ok = allowed.some(
+    (a) => a.toLowerCase() === normalized || a.toLowerCase() === langName.toLowerCase()
+  );
+
+  if (!ok) {
+    return {
+      pass: false,
+      reason: `excluded_language_${normalized}`,
+      message: `言語が対象外: ${langName} (${normalized})`
+    };
+  }
+  return { pass: true };
+}
+
 export function evaluateProjectFilters(project, settings) {
   const minPriceUsd = settings.minPriceUsd ?? 100;
   const maxBudgetUsd = settings.maxBudget ?? 0;
   const excludedCountries = settings.excludedCountries || DEFAULT_EXCLUDED_COUNTRIES;
   const allowedTypes = settings.projectTypes || ['fixed', 'hourly'];
   const bidType = project.bidType || 'fixed';
+
+  const languageFilter = evaluateLanguageFilter(project, settings);
+  if (!languageFilter.pass) {
+    return languageFilter;
+  }
 
   if (allowedTypes.length && !allowedTypes.includes(bidType)) {
     return {

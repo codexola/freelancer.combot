@@ -53,7 +53,7 @@ function renderSettings() {
     'defaultBidAmount', 'defaultDeliveryDays', 'defaultHourlyRate', 'profileName',
     'bidWindowMinSec', 'bidWindowMaxSec', 'bidExecutionGraceSec', 'maxBidCount',
     'freelancerOAuthToken',
-    'fullName', 'fullAddress', 'minPriceUsd', 'maxBudget'
+    'fullName', 'fullAddress', 'minPriceUsd', 'maxBudget', 'languages'
   ];
   fields.forEach((f) => {
     const el = $(f);
@@ -73,6 +73,9 @@ function renderSettings() {
 
   const excluded = currentSettings.excludedCountries || [];
   $('excludedCountries').value = excluded.join(', ');
+  if ($('languages')) {
+    $('languages').value = (currentSettings.languages || ['en', 'es', 'pt', 'zh']).join(', ');
+  }
 
   renderPortfolio();
 }
@@ -92,12 +95,16 @@ function updatePortfolioMeta() {
   meta.textContent = `${count} 件のリンクを検出`;
 }
 
-function parseExcludedCountries(text) {
+function parseListField(text) {
   if (!text?.trim()) return [];
   return text
     .split(/[,;\n]+/)
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean);
+}
+
+function parseExcludedCountries(text) {
+  return parseListField(text);
 }
 
 function collectSettings() {
@@ -135,6 +142,7 @@ function collectSettings() {
     minBudget: parseFloat($('minPriceUsd').value) || 100,
     maxBudget: parseFloat($('maxBudget').value) || 10000,
     excludedCountries: parseExcludedCountries($('excludedCountries').value),
+    languages: parseListField($('languages')?.value || ''),
     projectTypes,
     portfolioLinksText,
     portfolioLinks

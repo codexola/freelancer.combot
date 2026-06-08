@@ -197,8 +197,9 @@
             </div>
           </div>
           <div class="form-group">
-            <label>入札文の言語</label>
-            <p class="hint">標準は英語。クライアントがプロジェクト広告で使用している言語で自動生成します。</p>
+            <label>対象プロジェクト言語（Freelancer検索フィルタと同期）</label>
+            <p class="hint">カンマ区切り ISO コード（例: en, es, pt, zh）。開始時に Freelancer localStorage から自動同期されます。</p>
+            <input type="text" id="languages" placeholder="en, es, pt, zh">
           </div>
           <div class="form-group">
             <label>除外プロジェクトカテゴリ</label>

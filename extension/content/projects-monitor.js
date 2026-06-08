@@ -24,7 +24,33 @@ let isMonitoring = false;
 let observer = null;
 let scanIntervalId = null;
 let seenProjectIds = new Set();
+let seenNumericIds = new Set();
 let hasSeededSeen = false;
+
+function isProjectSeen(project) {
+  if (!project) return false;
+  if (seenProjectIds.has(project.projectId)) return true;
+  const numeric = project.numericProjectId ?? project.numericId;
+  if (numeric != null) {
+    const key = String(numeric);
+    if (seenProjectIds.has(key) || seenNumericIds.has(key)) return true;
+  }
+  const session = window.FabFreelancerSession;
+  if (session?.isProjectSeenByFreelancer?.(project, seenNumericIds)) return true;
+  return false;
+}
+
+function absorbFreelancerSession() {
+  const session = window.FabFreelancerSession?.readSessionSnapshot?.();
+  if (!session) return { userId: null, viewed: 0 };
+
+  for (const id of session.viewedNumericIds || []) {
+    const key = String(id);
+    seenProjectIds.add(key);
+    seenNumericIds.add(key);
+  }
+  return { userId: session.userId, viewed: session.viewedNumericIds?.length || 0 };
+}
 
 function parseBidCount(text) {
   if (!text) return null;
@@ -376,11 +402,9 @@ function mergeProjects(...groups) {
 
 async function loadSeenProjects() {
   const archiveRes = await chrome.runtime.sendMessage({ type: 'GET_ARCHIVE_IDS' }).catch(() => null);
-  if (archiveRes?.ids?.length) {
-    seenProjectIds = new Set(archiveRes.ids);
-    return;
-  }
-  seenProjectIds = new Set();
+  seenProjectIds = new Set(archiveRes?.ids || []);
+  seenNumericIds = new Set();
+  absorbFreelancerSession();
 }
 
 function notifyNewProjects(projects, seedBaseline = false) {
@@ -424,7 +448,11 @@ async function runScan() {
   const projects = mergeProjects(apiProjects, domProjects).sort(compareProjectsByNewest);
 
   if (!hasSeededSeen) {
-    projects.forEach((p) => seenProjectIds.add(p.projectId));
+    absorbFreelancerSession();
+    projects.forEach((p) => {
+      seenProjectIds.add(p.projectId);
+      if (p.numericProjectId != null) seenNumericIds.add(String(p.numericProjectId));
+    });
     hasSeededSeen = true;
     notifyNewProjects(projects, true);
     notifyScanResult({
@@ -436,12 +464,16 @@ async function runScan() {
     return;
   }
 
+  absorbFreelancerSession();
+
   const newProjects = [];
   for (const project of projects) {
-    if (!seenProjectIds.has(project.projectId)) {
-      seenProjectIds.add(project.projectId);
-      newProjects.push(project);
+    if (isProjectSeen(project)) continue;
+    seenProjectIds.add(project.projectId);
+    if (project.numericProjectId != null) {
+      seenNumericIds.add(String(project.numericProjectId));
     }
+    newProjects.push(project);
   }
 
   notifyScanResult({
@@ -527,10 +559,23 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     enrichProject(msg.project).then((project) => sendResponse({ ok: true, project }));
   } else if (msg.type === 'API_PLACE_BID') {
     apiPlaceBid(msg.project, msg.bidData, msg.settings).then(sendResponse);
+  } else if (msg.type === 'GET_FREELANCER_SESSION') {
+    const session = window.FabFreelancerSession?.readSessionSnapshot?.() || null;
+    if (session?.viewedNumericIds?.length) {
+      for (const id of session.viewedNumericIds) {
+        seenNumericIds.add(String(id));
+        seenProjectIds.add(String(id));
+      }
+    }
+    sendResponse({ ok: true, session });
   } else if (msg.type === 'GET_MONITOR_STATUS') {
-    sendResponse({ isMonitoring });
+    sendResponse({ isMonitoring, seenCount: seenProjectIds.size, viewedNumeric: seenNumericIds.size });
   } else if (msg.type === 'PING') {
-    sendResponse({ ok: true, hasApi: !!window.FabFreelancerApi });
+    sendResponse({
+      ok: true,
+      hasApi: !!window.FabFreelancerApi,
+      hasSession: !!window.FabFreelancerSession
+    });
   }
   return true;
 });
