@@ -176,13 +176,41 @@ export function meetsMinPrice(budgetText, bidType, minUsd = 100) {
   return parsed.minUsd >= minUsd;
 }
 
+const COUNTRY_ALIASES = {
+  in: 'india',
+  ind: 'india',
+  pk: 'pakistan',
+  ng: 'nigeria',
+  za: 'south africa',
+  eg: 'egypt',
+  ke: 'kenya',
+  bd: 'bangladesh',
+  'ivory coast': "cote d'ivoire",
+  'côte d\'ivoire': "cote d'ivoire"
+};
+
+export function normalizeCountryText(countryText) {
+  if (!countryText) return '';
+  return countryText.toLowerCase().trim().replace(/\s+/g, ' ');
+}
+
 export function isExcludedCountry(countryText, excludedList) {
   if (!countryText) return false;
-  const normalized = countryText.toLowerCase().trim();
+  const normalized = normalizeCountryText(countryText);
+  const alias = COUNTRY_ALIASES[normalized] || normalized;
   const list = excludedList || DEFAULT_EXCLUDED_COUNTRIES;
   return list.some((country) => {
-    const c = country.toLowerCase();
-    return normalized === c || normalized.includes(c) || c.includes(normalized);
+    const c = normalizeCountryText(country);
+    const cAlias = COUNTRY_ALIASES[c] || c;
+    return (
+      normalized === c ||
+      alias === c ||
+      normalized === cAlias ||
+      normalized.includes(c) ||
+      c.includes(normalized) ||
+      alias.includes(c) ||
+      c.includes(alias)
+    );
   });
 }
 
@@ -418,15 +446,40 @@ export function evaluateProjectFilters(project, settings) {
   }
 
   const clientCountry = project.clientCountry || project.country || '';
-  if (isExcludedCountry(clientCountry, excludedCountries)) {
+  if (clientCountry && isExcludedCountry(clientCountry, excludedCountries)) {
     return {
       pass: false,
       reason: `excluded_country_${clientCountry}`,
-      message: `除外国: ${clientCountry}`
+      message: `除外国: ${clientCountry}`,
+      requirementAnalysis
+    };
+  }
+
+  const requireKnownCountry = settings.skipUnknownCountry !== false;
+  if (requireKnownCountry && excludedCountries.length > 0 && !clientCountry) {
+    return {
+      pass: false,
+      reason: 'country_unknown',
+      message: 'クライアント国が不明のためスキップ（除外国設定あり）',
+      requirementAnalysis
     };
   }
 
   return { pass: true, requirementAnalysis };
+}
+
+export function evaluateExecutionDeadline(project, settings) {
+  const graceSec = settings.bidExecutionGraceSec ?? 180;
+  const deadline = project.bidDeadlineAt || project.eligibleUntil;
+  if (!deadline) return { pass: true };
+  if (Date.now() > deadline) {
+    return {
+      pass: false,
+      reason: 'execution_timeout',
+      message: `入札実行期限超過 (${graceSec}秒)`
+    };
+  }
+  return { pass: true };
 }
 
 export function getProjectAgeSeconds(project) {
@@ -504,8 +557,5 @@ export function evaluateAgeWindow(project, settings) {
 
 export function getProposalLanguageInstruction(project) {
   const lang = detectProjectLanguage(project);
-  if (lang === 'English') {
-    return 'Write the proposal in English.';
-  }
-  return `Write the proposal in ${lang} (the language used by the client in the project advertisement). If uncertain, default to English.`;
+  return `You MUST write the entire proposal in ${lang}. This is the language the client used in their project advertisement. Do not use any other language.`;
 }

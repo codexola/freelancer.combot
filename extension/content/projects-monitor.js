@@ -307,6 +307,8 @@ function normalizeApiProject(item) {
 
   return {
     projectId: String(projectId),
+    numericProjectId: rawId != null ? Number(rawId) : null,
+    seoUrl: seoUrl || projectId,
     url: parsed?.url || normalizeDetailsUrl(href),
     title,
     bidCount: item.bid_count ?? item.bidCount ?? item.bids ?? null,
@@ -494,6 +496,25 @@ function stopMonitoring() {
   }
 }
 
+async function enrichProject(project) {
+  const api = window.FabFreelancerApi;
+  if (!api?.fetchProjectDetails) return project;
+  try {
+    const details = await api.fetchProjectDetails(project);
+    return details ? { ...project, ...details } : project;
+  } catch {
+    return project;
+  }
+}
+
+async function apiPlaceBid(project, bidData, settings) {
+  const api = window.FabFreelancerApi;
+  if (!api?.placeBidViaApi) {
+    return { success: false, error: 'api_module_missing' };
+  }
+  return api.placeBidViaApi(project, bidData, settings);
+}
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === 'START_MONITORING') {
     startMonitoring().then(() => sendResponse({ ok: true }));
@@ -502,10 +523,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     sendResponse({ ok: true });
   } else if (msg.type === 'SCAN_PROJECTS') {
     runScan().then(() => sendResponse({ ok: true })).catch(() => sendResponse({ ok: false }));
+  } else if (msg.type === 'ENRICH_PROJECT') {
+    enrichProject(msg.project).then((project) => sendResponse({ ok: true, project }));
+  } else if (msg.type === 'API_PLACE_BID') {
+    apiPlaceBid(msg.project, msg.bidData, msg.settings).then(sendResponse);
   } else if (msg.type === 'GET_MONITOR_STATUS') {
     sendResponse({ isMonitoring });
   } else if (msg.type === 'PING') {
-    sendResponse({ ok: true });
+    sendResponse({ ok: true, hasApi: !!window.FabFreelancerApi });
   }
   return true;
 });

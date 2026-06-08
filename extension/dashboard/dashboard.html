@@ -119,12 +119,35 @@
             </div>
             <div class="form-group">
               <label>入札時間窓 最大（秒）</label>
-              <input type="number" id="bidWindowMaxSec" min="1" max="120">
+              <input type="number" id="bidWindowMaxSec" min="10" max="600">
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>入札実行猶予（秒）</label>
+              <input type="number" id="bidExecutionGraceSec" min="30" max="600">
+              <p class="hint">検出後、この秒数以内に入札を完了します（遅い回線向け）</p>
+            </div>
+            <div class="form-group">
+              <label>最大入札者数（超過時スキップ）</label>
+              <input type="number" id="maxBidCount" min="1" value="50">
             </div>
           </div>
           <div class="form-group">
-            <label>最大入札者数（超過時スキップ）</label>
-            <input type="number" id="maxBidCount" min="1" value="50">
+            <label>
+              <input type="checkbox" id="slowNetworkMode" checked>
+              遅い回線モード（ページ読込・API入札のタイムアウトを延長）
+            </label>
+          </div>
+          <div class="form-group">
+            <label>
+              <input type="checkbox" id="preferApiBidding" checked>
+              API入札を優先（ページを開かずに入札、NDA時のみブラウザ）
+            </label>
+          </div>
+          <div class="form-group">
+            <label>Freelancer OAuth トークン（任意）</label>
+            <input type="password" id="freelancerOAuthToken" placeholder="API入札用（未設定時はセッションCookieを使用）">
           </div>
         </div>
 
@@ -188,8 +211,12 @@
           </div>
           <div class="form-group">
             <label>除外クライアント国</label>
-            <p class="hint">インド・パキスタン・アフリカ諸国のプロジェクトには入札しません。</p>
-            <textarea id="excludedCountries" rows="4" readonly></textarea>
+            <p class="hint">カンマ区切り。国が不明な案件もスキップします（除外国設定時）。</p>
+            <textarea id="excludedCountries" rows="4"></textarea>
+            <label class="checkbox-label">
+              <input type="checkbox" id="skipUnknownCountry" checked>
+              国が不明な案件をスキップ
+            </label>
           </div>
           <div class="form-group">
             <label>プロジェクトタイプ</label>

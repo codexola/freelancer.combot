@@ -28,6 +28,7 @@ import { solveProblem } from '../lib/problem-solver.js';
 import {
   evaluateProjectFilters,
   evaluateAgeWindow,
+  evaluateExecutionDeadline,
   detectProjectLanguage,
   analyzeProjectRequirements
 } from '../lib/filters.js';
@@ -48,7 +49,12 @@ let isProcessingBid = false;
 const pendingYoungProjects = new Map();
 let pendingRetryTimer = null;
 let lastScanLog = { at: 0, signature: '' };
-const MONITOR_SCRIPT_FILES = ['lib/project-url-content.js', 'content/projects-monitor.js'];
+const MONITOR_SCRIPT_FILES = [
+  'lib/project-url-content.js',
+  'lib/freelancer-api-content.js',
+  'content/projects-monitor.js'
+];
+let bidWorkerTabId = null;
 
 async function injectMonitorScripts(tabId) {
   await chrome.scripting.executeScript({
@@ -235,6 +241,38 @@ function normalizeProject(project) {
   };
 }
 
+async function enrichProjectViaMonitor(project) {
+  if (!monitorTabId) return project;
+  const res = await chrome.tabs.sendMessage(monitorTabId, { type: 'ENRICH_PROJECT', project }).catch(() => null);
+  return res?.project ? { ...project, ...res.project } : project;
+}
+
+async function tryApiBidViaMonitor(project, bidData, settings) {
+  if (!monitorTabId || settings.preferApiBidding === false) {
+    return { success: false, error: 'api_disabled' };
+  }
+  return chrome.tabs.sendMessage(monitorTabId, {
+    type: 'API_PLACE_BID',
+    project,
+    bidData,
+    settings
+  }).catch(() => ({ success: false, error: 'api_message_failed' }));
+}
+
+async function skipProject(project, reason, message, settings) {
+  await markProjectProcessed(project.projectId, reason);
+  await archiveProjectResult(project, reason, { reason, message });
+  await recordFilterStatus(project, 'skipped', { reason, message, level: 'warn' });
+  await recordBidAttempt({
+    success: false,
+    skipped: true,
+    projectId: project.projectId,
+    title: project.title,
+    message: message || reason,
+    level: 'warn'
+  });
+}
+
 async function filterProject(project, settings) {
   const processed = await getProcessedProjects();
   const existing = processed[project.projectId];
@@ -316,8 +354,15 @@ function schedulePendingRetries() {
 async function enqueueProject(project, settings) {
   if (await isProjectInFlight(project.projectId)) return false;
 
+  const graceSec = settings.bidExecutionGraceSec ?? 180;
+  const enriched = {
+    ...project,
+    bidDeadlineAt: Date.now() + graceSec * 1000,
+    eligibleUntil: Date.now() + graceSec * 1000
+  };
+
   await markProjectProcessed(project.projectId, 'queued');
-  bidQueue.push({ project, settings });
+  bidQueue.push({ project: enriched, settings });
   bidQueue.sort((a, b) => compareProjectsByNewest(a.project, b.project));
   await recordFilterStatus(project, 'queued', {
     message: `入札キューに追加 (${project.bidCount ?? '?'} bids) — ${project.url}`
@@ -358,8 +403,18 @@ async function processProjectThroughPipeline(project, settings, { isNew = true }
     });
   }
 
+  let candidate = normalized;
+  const needsEnrichment =
+    !candidate.clientCountry ||
+    !candidate.description ||
+    !candidate.numericProjectId ||
+    settings.skipUnknownCountry !== false;
+  if (needsEnrichment) {
+    candidate = await enrichProjectViaMonitor(candidate);
+  }
+
   const { pass, reason, message, defer, retryInMs, requirementAnalysis } = await filterProject(
-    normalized,
+    candidate,
     settings
   );
   const reqMsg = requirementAnalysis?.summary || reqPreview.summary;
@@ -367,15 +422,17 @@ async function processProjectThroughPipeline(project, settings, { isNew = true }
 
   if (pass) {
     archiveStatus = 'passed';
-    await recordFilterStatus(normalized, 'passed', { message: `フィルター通過 — ${reqMsg}` });
-    await archiveProjectResult(normalized, archiveStatus, { message: reqMsg });
-    await enqueueProject(normalized, settings);
+    await recordFilterStatus(candidate, 'passed', {
+      message: `フィルター通過 — ${reqMsg}${candidate.clientCountry ? ` / ${candidate.clientCountry}` : ''}`
+    });
+    await archiveProjectResult(candidate, archiveStatus, { message: reqMsg });
+    await enqueueProject(candidate, settings);
   } else if (defer && retryInMs) {
     archiveStatus = 'deferred';
-    await markProjectProcessed(normalized.projectId, 'deferred');
-    await recordFilterStatus(normalized, 'deferred', { reason, message: `${message} — ${reqMsg}` });
-    await archiveProjectResult(normalized, archiveStatus, { reason, message });
-    scheduleYoungProjectRetry(normalized, settings, retryInMs);
+    await markProjectProcessed(candidate.projectId, 'deferred');
+    await recordFilterStatus(candidate, 'deferred', { reason, message: `${message} — ${reqMsg}` });
+    await archiveProjectResult(candidate, archiveStatus, { reason, message });
+    scheduleYoungProjectRetry(candidate, settings, retryInMs);
   } else {
     const quiet = reason === 'already_processed' || reason === 'already_queued';
     if (!quiet || isNew) {
@@ -449,70 +506,64 @@ async function processBidQueue() {
   isProcessingBid = false;
 }
 
+async function ensureBidWorkerTab(bidUrl) {
+  const loadTimeout = settingsSlowMs();
+  if (bidWorkerTabId) {
+    try {
+      const tab = await chrome.tabs.get(bidWorkerTabId);
+      if (tab?.id) {
+        await chrome.tabs.update(bidWorkerTabId, { url: bidUrl, active: false });
+        await waitForTabLoad(bidWorkerTabId, loadTimeout);
+        return bidWorkerTabId;
+      }
+    } catch {
+      bidWorkerTabId = null;
+    }
+  }
+  const tab = await chrome.tabs.create({ url: bidUrl, active: false });
+  bidWorkerTabId = tab.id;
+  await waitForTabLoad(tab.id, loadTimeout);
+  return tab.id;
+}
+
+function settingsSlowMs() {
+  return 45000;
+}
+
 async function executeBidFlow(project, settings) {
   const startTime = Date.now();
-  let tab = null;
+  let tabId = null;
+  const slowMode = settings.slowNetworkMode !== false;
 
   try {
+    const deadlineCheck = evaluateExecutionDeadline(project, settings);
+    if (!deadlineCheck.pass) {
+      await skipProject(project, deadlineCheck.reason, deadlineCheck.message, settings);
+      return;
+    }
+
     await markProjectProcessed(project.projectId, 'bidding');
-    await recordFilterStatus(project, 'bidding', { message: '入札処理中' });
-    const bidUrl = normalizeDetailsUrl(project.url);
-    tab = await chrome.tabs.create({ url: bidUrl, active: false });
-    await waitForTabLoad(tab.id);
+    await recordFilterStatus(project, 'bidding', { message: '入札処理中（API優先）' });
 
-    const scriptReady = await waitForContentScript(tab.id);
-    if (!scriptReady) {
-      await recordFilterStatus(project, 'failed', {
-        reason: 'content_script_timeout',
-        message: 'content script通信失敗（タイムアウト）'
-      });
-      await recordBidAttempt({
-        success: false,
-        projectId: project.projectId,
-        title: project.title,
-        message: 'content script通信失敗（タイムアウト）',
-        level: 'error'
-      });
-      await markProjectProcessed(project.projectId, 'failed');
+    let projectData = await enrichProjectViaMonitor(project);
+    const preFilter = evaluateProjectFilters(projectData, settings);
+    if (!preFilter.pass) {
+      await skipProject(
+        project,
+        preFilter.reason,
+        preFilter.message || preFilter.reason,
+        settings
+      );
       return;
     }
 
-    const bidCountRes = await chrome.tabs.sendMessage(tab.id, { type: 'GET_BID_COUNT' }).catch(() => null);
-    if (bidCountRes?.bidCount != null && bidCountRes.bidCount >= settings.maxBidCount) {
-      await markProjectProcessed(project.projectId, 'skipped_bid_count');
-      await recordFilterStatus(project, 'skipped', {
-        reason: 'skipped_bid_count',
-        message: `入札者数 ${bidCountRes.bidCount} >= ${settings.maxBidCount}`
-      });
-      await recordBidAttempt({
-        success: false,
-        skipped: true,
-        projectId: project.projectId,
-        title: project.title,
-        message: `入札者数 ${bidCountRes.bidCount} >= ${settings.maxBidCount}`,
-        level: 'warn'
-      });
-      return;
-    }
-
-    const projectDataRes = await chrome.tabs.sendMessage(tab.id, { type: 'GET_PROJECT_DATA' }).catch(() => null);
-    const projectData = { ...project, ...(projectDataRes || {}) };
-
-    const pageFilter = evaluateProjectFilters(projectData, settings);
-    if (!pageFilter.pass) {
-      await markProjectProcessed(project.projectId, pageFilter.reason);
-      await recordFilterStatus(project, 'skipped', {
-        reason: pageFilter.reason,
-        message: pageFilter.message || pageFilter.reason
-      });
-      await recordBidAttempt({
-        success: false,
-        skipped: true,
-        projectId: project.projectId,
-        title: project.title,
-        message: pageFilter.message || pageFilter.reason,
-        level: 'warn'
-      });
+    if (projectData.bidCount != null && projectData.bidCount >= settings.maxBidCount) {
+      await skipProject(
+        project,
+        'skipped_bid_count',
+        `入札者数 ${projectData.bidCount} >= ${settings.maxBidCount}`,
+        settings
+      );
       return;
     }
 
@@ -523,7 +574,7 @@ async function executeBidFlow(project, settings) {
       proposal = buildFallbackProposal(projectData, settings);
       await addBidLog({
         level: 'warn',
-        message: `API入札文生成失敗、フォールバック使用: ${apiErr.message}`,
+        message: `AI入札文生成失敗、フォールバック使用: ${apiErr.message}`,
         projectId: project.projectId
       });
     }
@@ -532,31 +583,76 @@ async function executeBidFlow(project, settings) {
       proposal,
       bidAmount: settings.defaultBidAmount,
       hourlyRate: settings.defaultHourlyRate,
-      deliveryDays: settings.defaultDeliveryDays
+      deliveryDays: settings.defaultDeliveryDays,
+      bidType: projectData.bidType
     };
 
-    let result = await chrome.tabs.sendMessage(tab.id, {
-      type: 'EXECUTE_BID',
-      bidData,
-      settings
-    }).catch(() => ({ success: false, error: 'content script通信失敗' }));
-
-    if (!result?.success && (result?.needsDocumentSign || result?.error?.includes('署名'))) {
-      if (settings.autoSignDocuments !== false) {
-        result = await handleDocumentSigning(tab.id, settings, result, bidData);
-      } else {
-        result = { success: false, skipped: true, error: '書類署名が必要（自動署名オフ）' };
-      }
+    let result = null;
+    if (settings.preferApiBidding !== false) {
+      result = await tryApiBidViaMonitor(projectData, bidData, settings);
+    } else {
+      result = { success: false, error: 'api_disabled' };
     }
 
     if (!result?.success) {
-      const solveResult = await attemptProblemSolve(tab.id, project, result, settings);
-      if (solveResult?.resolved) {
-        result = await chrome.tabs.sendMessage(tab.id, {
-          type: 'EXECUTE_BID',
-          bidData,
+      const bidUrl = normalizeDetailsUrl(projectData.url || project.url);
+      tabId = await ensureBidWorkerTab(bidUrl);
+
+      const scriptTimeout = slowMode ? 35000 : OCTO_CONTENT_SCRIPT_MS;
+      const scriptReady = await waitForContentScript(tabId, scriptTimeout);
+      if (!scriptReady) {
+        await recordFilterStatus(project, 'failed', {
+          reason: 'content_script_timeout',
+          message: 'ページ読込が遅いため入札フォームに接続できませんでした'
+        });
+        await recordBidAttempt({
+          success: false,
+          projectId: project.projectId,
+          title: project.title,
+          message: 'content script通信失敗（タイムアウト）',
+          level: 'error'
+        });
+        await markProjectProcessed(project.projectId, 'failed');
+        return;
+      }
+
+      const pageDataRes = await chrome.tabs.sendMessage(tabId, { type: 'GET_PROJECT_DATA' }).catch(() => null);
+      projectData = { ...projectData, ...(pageDataRes || {}) };
+
+      const pageFilter = evaluateProjectFilters(projectData, settings);
+      if (!pageFilter.pass) {
+        await skipProject(
+          project,
+          pageFilter.reason,
+          pageFilter.message || pageFilter.reason,
           settings
-        }).catch(() => result);
+        );
+        return;
+      }
+
+      result = await chrome.tabs.sendMessage(tabId, {
+        type: 'EXECUTE_BID',
+        bidData,
+        settings
+      }).catch(() => ({ success: false, error: 'content script通信失敗' }));
+
+      if (!result?.success && (result?.needsDocumentSign || result?.error?.includes('署名'))) {
+        if (settings.autoSignDocuments !== false) {
+          result = await handleDocumentSigning(tabId, settings, result, bidData);
+        } else {
+          result = { success: false, skipped: true, error: '書類署名が必要（自動署名オフ）' };
+        }
+      }
+
+      if (!result?.success && slowMode) {
+        const solveResult = await attemptProblemSolve(tabId, project, result, settings);
+        if (solveResult?.resolved) {
+          result = await chrome.tabs.sendMessage(tabId, {
+            type: 'EXECUTE_BID',
+            bidData,
+            settings
+          }).catch(() => result);
+        }
       }
     }
 
@@ -605,10 +701,6 @@ async function executeBidFlow(project, settings) {
     });
     await markProjectProcessed(project.projectId, 'error');
   } finally {
-    if (tab?.id) {
-      await sleep(2000);
-      chrome.tabs.remove(tab.id).catch(() => {});
-    }
     if (monitorTabId) {
       chrome.tabs.sendMessage(monitorTabId, { type: 'SCAN_PROJECTS' }).catch(() => {});
     }

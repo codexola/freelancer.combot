@@ -51,7 +51,8 @@ function renderSettings() {
   const fields = [
     'preferredAiProvider', 'claudeApiKey', 'openaiApiKey', 'proposalStyle',
     'defaultBidAmount', 'defaultDeliveryDays', 'defaultHourlyRate', 'profileName',
-    'bidWindowMinSec', 'bidWindowMaxSec', 'maxBidCount',
+    'bidWindowMinSec', 'bidWindowMaxSec', 'bidExecutionGraceSec', 'maxBidCount',
+    'freelancerOAuthToken',
     'fullName', 'fullAddress', 'minPriceUsd', 'maxBudget'
   ];
   fields.forEach((f) => {
@@ -62,6 +63,9 @@ function renderSettings() {
   $('autoSignDocuments').checked = currentSettings.autoSignDocuments !== false;
   $('skipNdaProjects').checked = !!currentSettings.skipNdaProjects;
   $('skipExcludedCategories').checked = currentSettings.skipExcludedCategories !== false;
+  $('slowNetworkMode').checked = currentSettings.slowNetworkMode !== false;
+  $('preferApiBidding').checked = currentSettings.preferApiBidding !== false;
+  $('skipUnknownCountry').checked = currentSettings.skipUnknownCountry !== false;
   $('excludedCategoriesInfo').value =
     'マーケティング, 成人コンテンツ, 仮想秘書 (採用・VA・パーソナルアシスタント)';
   $('typeFixed').checked = (currentSettings.projectTypes || ['fixed', 'hourly']).includes('fixed');
@@ -88,6 +92,14 @@ function updatePortfolioMeta() {
   meta.textContent = `${count} 件のリンクを検出`;
 }
 
+function parseExcludedCountries(text) {
+  if (!text?.trim()) return [];
+  return text
+    .split(/[,;\n]+/)
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+}
+
 function collectSettings() {
   const projectTypes = [];
   if ($('typeFixed').checked) projectTypes.push('fixed');
@@ -107,8 +119,13 @@ function collectSettings() {
     defaultHourlyRate: parseFloat($('defaultHourlyRate').value) || 25,
     profileName: $('profileName').value || 'General',
     bidWindowMinSec: parseInt($('bidWindowMinSec').value, 10) || 3,
-    bidWindowMaxSec: parseInt($('bidWindowMaxSec').value, 10) || 10,
+    bidWindowMaxSec: parseInt($('bidWindowMaxSec').value, 10) || 300,
+    bidExecutionGraceSec: parseInt($('bidExecutionGraceSec').value, 10) || 180,
     maxBidCount: parseInt($('maxBidCount').value, 10) || 50,
+    slowNetworkMode: $('slowNetworkMode').checked,
+    preferApiBidding: $('preferApiBidding').checked,
+    skipUnknownCountry: $('skipUnknownCountry').checked,
+    freelancerOAuthToken: $('freelancerOAuthToken').value,
     fullName: $('fullName').value,
     fullAddress: $('fullAddress').value,
     autoSignDocuments: $('autoSignDocuments').checked,
@@ -117,7 +134,7 @@ function collectSettings() {
     minPriceUsd: parseFloat($('minPriceUsd').value) || 100,
     minBudget: parseFloat($('minPriceUsd').value) || 100,
     maxBudget: parseFloat($('maxBudget').value) || 10000,
-    excludedCountries: (currentSettings.excludedCountries || []),
+    excludedCountries: parseExcludedCountries($('excludedCountries').value),
     projectTypes,
     portfolioLinksText,
     portfolioLinks
@@ -337,7 +354,7 @@ function setupEventListeners() {
   });
 
   const watchFields = document.querySelectorAll(
-    'input, select, textarea, #autoSignDocuments, #skipNdaProjects, #typeFixed, #typeHourly'
+    'input, select, textarea, #autoSignDocuments, #skipNdaProjects, #slowNetworkMode, #preferApiBidding, #skipUnknownCountry, #typeFixed, #typeHourly'
   );
   watchFields.forEach((el) => {
     el.addEventListener('input', onSettingsChange);

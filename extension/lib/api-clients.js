@@ -15,31 +15,39 @@ import {
   MAX_PROPOSAL_LENGTH
 } from './portfolio.js';
 
-export async function generateProposal(settings, projectData) {
-  const prompt = buildProposalPrompt(projectData, settings);
+async function callWithFallback(settings, prompt) {
   const provider = settings.preferredAiProvider || 'claude';
-  let rawText = '';
+  const attempts = [];
 
-  try {
-    if (provider === 'claude' && settings.claudeApiKey) {
-      rawText = await callClaude(settings.claudeApiKey, prompt);
-    } else if (settings.openaiApiKey) {
-      rawText = await callOpenAI(settings.openaiApiKey, prompt);
-    } else if (settings.claudeApiKey) {
-      rawText = await callClaude(settings.claudeApiKey, prompt);
-    } else {
-      throw new Error('APIキーが設定されていません');
-    }
-  } catch (err) {
-    if (provider === 'claude' && settings.openaiApiKey) {
-      rawText = await callOpenAI(settings.openaiApiKey, prompt);
-    } else if (provider === 'openai' && settings.claudeApiKey) {
-      rawText = await callClaude(settings.claudeApiKey, prompt);
-    } else {
-      throw err;
-    }
+  if (provider === 'claude') {
+    if (settings.claudeApiKey) attempts.push(() => callClaude(settings.claudeApiKey, prompt));
+    if (settings.openaiApiKey) attempts.push(() => callOpenAI(settings.openaiApiKey, prompt));
+  } else {
+    if (settings.openaiApiKey) attempts.push(() => callOpenAI(settings.openaiApiKey, prompt));
+    if (settings.claudeApiKey) attempts.push(() => callClaude(settings.claudeApiKey, prompt));
   }
 
+  if (!attempts.length) {
+    throw new Error('Claude または OpenAI の API キーを設定してください');
+  }
+
+  let lastError = null;
+  for (const attempt of attempts) {
+    try {
+      return await attempt();
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError || new Error('入札文の生成に失敗しました');
+}
+
+export async function generateProposal(settings, projectData) {
+  const prompt = buildProposalPrompt(projectData, settings);
+  const rawText = await callWithFallback(settings, prompt);
+  if (!rawText?.trim()) {
+    throw new Error('AIが空の入札文を返しました');
+  }
   return finalizeProposal(rawText, projectData, settings);
 }
 
@@ -71,8 +79,8 @@ Do NOT write a marketing, VA, or adult-content pitch unless that is clearly the 
 - Include only portfolio links most relevant to the client's requirements (from the list below)
 - Aim for ~${Math.max(textCharBudget, 200)} characters of proposal text so links fit within ${MAX_PROPOSAL_LENGTH} total
 - Use a natural, persuasive ${settings.proposalStyle || 'professional'} tone
-- Language rule: English is the standard default. ${languageInstruction}
-- Detected client/ad language: ${clientLanguage}
+- ${languageInstruction}
+- Client/ad language detected: ${clientLanguage} — match the client's writing style and vocabulary
 
 ## Project
 Title: ${project.title}
