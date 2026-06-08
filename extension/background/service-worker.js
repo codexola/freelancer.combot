@@ -15,6 +15,7 @@ import {
 import { generateProposal, analyzeProblem } from '../lib/api-clients.js';
 import { solveProblem } from '../lib/problem-solver.js';
 import { evaluateProjectFilters, detectProjectLanguage } from '../lib/filters.js';
+import { finalizeProposal } from '../lib/portfolio.js';
 
 const PROJECTS_URL = 'https://www.freelancer.com/search/projects';
 let monitorTabId = null;
@@ -280,17 +281,11 @@ async function attemptProblemSolve(tabId, project, result, settings) {
 }
 
 function buildFallbackProposal(project, settings) {
-  const links = (settings.portfolioLinks || [])
-    .slice(0, 2)
-    .map((l) => l.url)
-    .join('\n');
   const lang = detectProjectLanguage(project);
   const templates = {
     English: `Hi, I'm very interested in your project "${project.title}".
 
 I have extensive experience with ${(project.skills || []).slice(0, 5).join(', ')} and can deliver high-quality results within your budget and timeline.
-
-${links ? `Relevant work:\n${links}` : ''}
 
 I'd love to discuss your requirements in more detail. Looking forward to working with you!
 
@@ -299,8 +294,6 @@ Best regards`,
 
 Tengo amplia experiencia en ${(project.skills || []).slice(0, 5).join(', ')} y puedo entregar resultados de alta calidad dentro de su presupuesto y plazo.
 
-${links ? `Trabajos relevantes:\n${links}` : ''}
-
 Me encantaría discutir sus requisitos con más detalle. ¡Espero trabajar con usted!
 
 Saludos cordiales`,
@@ -308,14 +301,12 @@ Saludos cordiales`,
 
 J'ai une vaste expérience en ${(project.skills || []).slice(0, 5).join(', ')} et je peux livrer des résultats de haute qualité dans votre budget et délais.
 
-${links ? `Travaux pertinents:\n${links}` : ''}
-
 J'aimerais discuter de vos exigences plus en détail. Au plaisir de travailler avec vous!
 
 Cordialement`
   };
-  const text = templates[lang] || templates.English;
-  return text.slice(0, 1500);
+  const baseText = templates[lang] || templates.English;
+  return finalizeProposal(baseText, project, settings);
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {

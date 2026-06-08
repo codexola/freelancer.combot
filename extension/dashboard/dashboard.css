@@ -238,31 +238,17 @@ body {
   margin-bottom: 12px;
 }
 
-.portfolio-item {
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 12px;
-  margin-bottom: 8px;
+#portfolioLinksText {
+  font-family: Consolas, 'Courier New', monospace;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  resize: vertical;
+  min-height: 200px;
 }
 
-.portfolio-item input {
-  width: 100%;
-  margin-bottom: 6px;
-  padding: 6px 10px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--text);
-  font-size: 0.8rem;
-}
-
-.portfolio-item .remove-btn {
-  background: none;
-  border: none;
-  color: var(--danger);
-  cursor: pointer;
-  font-size: 0.8rem;
+.portfolio-meta {
+  margin-top: 6px;
+  color: var(--info);
 }
 
 .save-status {

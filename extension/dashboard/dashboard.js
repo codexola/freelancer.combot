@@ -3,6 +3,11 @@
  * 開始/停止/保管/削除/変更 - リアルタイム永続化
  */
 
+import {
+  parsePortfolioLinksText,
+  getPortfolioTextFromSettings
+} from './portfolio-ui.js';
+
 let currentSettings = {};
 let currentStats = {};
 let autoSaveTimer = null;
@@ -46,35 +51,18 @@ function renderSettings() {
 }
 
 function renderPortfolio() {
-  const list = $('portfolioList');
-  list.innerHTML = '';
-  (currentSettings.portfolioLinks || []).forEach((item, i) => {
-    const div = document.createElement('div');
-    div.className = 'portfolio-item';
-    div.innerHTML = `
-      <input type="text" data-field="title" data-idx="${i}" value="${esc(item.title || '')}" placeholder="タイトル">
-      <input type="url" data-field="url" data-idx="${i}" value="${esc(item.url || '')}" placeholder="https://...">
-      <input type="text" data-field="description" data-idx="${i}" value="${esc(item.description || '')}" placeholder="説明">
-      <input type="text" data-field="tags" data-idx="${i}" value="${esc((item.tags || []).join(', '))}" placeholder="タグ (カンマ区切り: react, seo, wordpress)">
-      <button class="remove-btn" data-remove="${i}">削除</button>
-    `;
-    list.appendChild(div);
-  });
-
-  list.querySelectorAll('input').forEach((input) => {
-    input.addEventListener('input', onSettingsChange);
-  });
-  list.querySelectorAll('.remove-btn').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      currentSettings.portfolioLinks.splice(parseInt(btn.dataset.remove), 1);
-      onSettingsChange();
-      renderPortfolio();
-    });
-  });
+  const textarea = $('portfolioLinksText');
+  if (!textarea) return;
+  textarea.value = getPortfolioTextFromSettings(currentSettings);
+  updatePortfolioMeta();
 }
 
-function esc(str) {
-  return str.replace(/"/g, '&quot;').replace(/</g, '&lt;');
+function updatePortfolioMeta() {
+  const meta = $('portfolioMeta');
+  if (!meta) return;
+  const text = $('portfolioLinksText')?.value || '';
+  const count = parsePortfolioLinksText(text).length;
+  meta.textContent = `${count} 件のリンクを検出`;
 }
 
 function collectSettings() {
@@ -82,14 +70,8 @@ function collectSettings() {
   if ($('typeFixed').checked) projectTypes.push('fixed');
   if ($('typeHourly').checked) projectTypes.push('hourly');
 
-  const portfolioLinks = [];
-  document.querySelectorAll('.portfolio-item').forEach((item) => {
-    const title = item.querySelector('[data-field="title"]')?.value || '';
-    const url = item.querySelector('[data-field="url"]')?.value || '';
-    const description = item.querySelector('[data-field="description"]')?.value || '';
-    const tags = (item.querySelector('[data-field="tags"]')?.value || '').split(',').map((t) => t.trim()).filter(Boolean);
-    if (url) portfolioLinks.push({ title, url, description, tags });
-  });
+  const portfolioLinksText = $('portfolioLinksText')?.value || '';
+  const portfolioLinks = parsePortfolioLinksText(portfolioLinksText);
 
   return {
     ...currentSettings,
@@ -113,6 +95,7 @@ function collectSettings() {
     maxBudget: parseFloat($('maxBudget').value) || 10000,
     excludedCountries: (currentSettings.excludedCountries || []),
     projectTypes,
+    portfolioLinksText,
     portfolioLinks
   };
 }
@@ -242,10 +225,8 @@ function setupEventListeners() {
     showSaveStatus('ログをクリアしました');
   });
 
-  $('btnAddPortfolio').addEventListener('click', () => {
-    if (!currentSettings.portfolioLinks) currentSettings.portfolioLinks = [];
-    currentSettings.portfolioLinks.push({ title: '', url: '', description: '', tags: [] });
-    renderPortfolio();
+  $('portfolioLinksText')?.addEventListener('input', () => {
+    updatePortfolioMeta();
     onSettingsChange();
   });
 

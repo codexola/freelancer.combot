@@ -3,38 +3,51 @@
  */
 
 import { detectProjectLanguage, getProposalLanguageInstruction } from './filters.js';
+import {
+  getPortfolioLinks,
+  selectRelevantLinks,
+  finalizeProposal,
+  enforceProposalLimit,
+  MAX_PROPOSAL_LENGTH
+} from './portfolio.js';
 
 export async function generateProposal(settings, projectData) {
   const prompt = buildProposalPrompt(projectData, settings);
   const provider = settings.preferredAiProvider || 'claude';
+  let rawText = '';
 
   try {
     if (provider === 'claude' && settings.claudeApiKey) {
-      return await callClaude(settings.claudeApiKey, prompt);
+      rawText = await callClaude(settings.claudeApiKey, prompt);
+    } else if (settings.openaiApiKey) {
+      rawText = await callOpenAI(settings.openaiApiKey, prompt);
+    } else if (settings.claudeApiKey) {
+      rawText = await callClaude(settings.claudeApiKey, prompt);
+    } else {
+      throw new Error('APIキーが設定されていません');
     }
-    if (settings.openaiApiKey) {
-      return await callOpenAI(settings.openaiApiKey, prompt);
-    }
-    if (settings.claudeApiKey) {
-      return await callClaude(settings.claudeApiKey, prompt);
-    }
-    throw new Error('APIキーが設定されていません');
   } catch (err) {
     if (provider === 'claude' && settings.openaiApiKey) {
-      return await callOpenAI(settings.openaiApiKey, prompt);
+      rawText = await callOpenAI(settings.openaiApiKey, prompt);
+    } else if (provider === 'openai' && settings.claudeApiKey) {
+      rawText = await callClaude(settings.claudeApiKey, prompt);
+    } else {
+      throw err;
     }
-    if (provider === 'openai' && settings.claudeApiKey) {
-      return await callClaude(settings.claudeApiKey, prompt);
-    }
-    throw err;
   }
+
+  return finalizeProposal(rawText, projectData, settings);
 }
 
 function buildProposalPrompt(project, settings) {
-  const relevantLinks = selectRelevantLinks(project, settings.portfolioLinks || []);
+  const portfolioLinks = getPortfolioLinks(settings);
+  const relevantLinks = selectRelevantLinks(project, portfolioLinks);
   const linksText = relevantLinks.length
-    ? relevantLinks.map((l) => `- ${l.title}: ${l.url} (${l.description || ''})`).join('\n')
+    ? relevantLinks.map((l) => `- ${l.url}${l.description ? ` (${l.description})` : ''}`).join('\n')
     : 'None';
+
+  const linksCharBudget = relevantLinks.reduce((sum, l) => sum + l.url.length + 2, 0);
+  const textCharBudget = MAX_PROPOSAL_LENGTH - linksCharBudget - 20;
 
   const clientLanguage = detectProjectLanguage(project);
   const languageInstruction = getProposalLanguageInstruction(project);
@@ -42,8 +55,10 @@ function buildProposalPrompt(project, settings) {
   return `You are a freelancer on Freelancer.com. Write a bid proposal for the project below.
 
 ## Constraints
-- Maximum 1500 characters (strict)
-- Include only portfolio links most relevant to the client's requirements
+- The ENTIRE proposal including any portfolio URLs must be ${MAX_PROPOSAL_LENGTH} characters or fewer (strict)
+- Portfolio links count toward the ${MAX_PROPOSAL_LENGTH} character limit
+- Include only portfolio links most relevant to the client's requirements (from the list below)
+- Aim for ~${Math.max(textCharBudget, 200)} characters of proposal text so links fit within ${MAX_PROPOSAL_LENGTH} total
 - Use a natural, persuasive ${settings.proposalStyle || 'professional'} tone
 - Language rule: English is the standard default. ${languageInstruction}
 - Detected client/ad language: ${clientLanguage}
@@ -56,22 +71,11 @@ Skills: ${(project.skills || []).join(', ')}
 Bid type: ${project.bidType || 'fixed'}
 Client country: ${project.clientCountry || 'unknown'}
 
-## Available portfolio links (include only relevant ones)
+## Available portfolio links (include only relevant ones in the proposal)
 ${linksText}
 
 ## Output
-Return only the proposal text. No explanations or markdown.`;
-}
-
-function selectRelevantLinks(project, portfolioLinks) {
-  if (!portfolioLinks.length) return [];
-  const projectText = `${project.title} ${project.description} ${(project.skills || []).join(' ')}`.toLowerCase();
-  return portfolioLinks
-    .filter((link) => {
-      const tags = (link.tags || []).map((t) => t.toLowerCase());
-      return tags.some((tag) => projectText.includes(tag));
-    })
-    .slice(0, 3);
+Return only the proposal text with relevant links included inline. No explanations or markdown. Total length must not exceed ${MAX_PROPOSAL_LENGTH} characters.`;
 }
 
 async function callClaude(apiKey, prompt) {
@@ -95,7 +99,7 @@ async function callClaude(apiKey, prompt) {
   }
   const data = await res.json();
   const text = data.content?.[0]?.text || '';
-  return text.slice(0, 1500);
+  return enforceProposalLimit(text, MAX_PROPOSAL_LENGTH);
 }
 
 async function callOpenAI(apiKey, prompt) {
@@ -117,7 +121,7 @@ async function callOpenAI(apiKey, prompt) {
   }
   const data = await res.json();
   const text = data.choices?.[0]?.message?.content || '';
-  return text.slice(0, 1500);
+  return enforceProposalLimit(text, MAX_PROPOSAL_LENGTH);
 }
 
 const WORKFLOW_REFERENCE = `

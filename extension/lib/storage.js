@@ -17,6 +17,7 @@ export const DEFAULT_SETTINGS = {
   fullAddress: '',
   signatureStrokes: [],
   portfolioLinks: [],
+  portfolioLinksText: '',
   claudeApiKey: '',
   openaiApiKey: '',
   preferredAiProvider: 'claude',

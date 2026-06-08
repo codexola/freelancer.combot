@@ -152,9 +152,13 @@
         </div>
 
         <div class="tab-content" id="tab-portfolio">
-          <p class="hint">顧客の要求に最も適したリンクのみ入札文に含まれます。タグで関連性を指定してください。</p>
-          <div id="portfolioList"></div>
-          <button class="btn btn-secondary btn-sm" id="btnAddPortfolio">+ リンク追加</button>
+          <p class="hint">過去のプロジェクトリンクを1行に1つずつ入力してください。説明は「URL | 説明」形式でも可。顧客の要求に最も適したリンクのみ入札文に含まれます。</p>
+          <div class="form-group">
+            <label>過去のプロジェクトリンク</label>
+            <textarea id="portfolioLinksText" rows="12" placeholder="https://example.com/project-1&#10;https://example.com/react-ecommerce | React EC site&#10;https://example.com/seo-optimization | SEO project"></textarea>
+          </div>
+          <p class="hint portfolio-meta" id="portfolioMeta">0 件のリンクを検出</p>
+          <p class="hint">入札文はリンクを含めて1500文字以内に収めます。</p>
         </div>
 
         <div class="tab-content" id="tab-filter">

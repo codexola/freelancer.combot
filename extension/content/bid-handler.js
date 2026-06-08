@@ -160,7 +160,8 @@
       findInputByContext(['proposal', 'describe', 'best candidate', 'makes you', 'bid text']) ||
       form.querySelector('textarea');
     if (proposalInput && bidData.proposal) {
-      setInputValue(proposalInput, bidData.proposal.slice(0, 1500));
+      const proposal = String(bidData.proposal).slice(0, 1500);
+      setInputValue(proposalInput, proposal);
     }
 
     await sleep(300);
