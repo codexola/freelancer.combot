@@ -4,6 +4,16 @@
 (function (global) {
   'use strict';
 
+  function cleanPathSegments(path) {
+    return path
+      .replace(/\/details\/?$/i, '')
+      .replace(/\/$/, '')
+      .split('/')
+      .filter(Boolean)
+      .map((seg) => seg.replace(/\.html$/i, ''))
+      .filter(Boolean);
+  }
+
   function normalizeDetailsUrl(href) {
     if (!href) return '';
 
@@ -13,13 +23,16 @@
 
     try {
       const url = new URL(absolute.split('?')[0].split('#')[0]);
-      let path = url.pathname.replace(/\/$/, '');
+      let segments = cleanPathSegments(url.pathname.replace(/^\/projects\/?/i, ''));
+      if (!segments.length) return '';
+
+      let path = `/projects/${segments.join('/')}`;
       if (!/\/details$/i.test(path)) {
         path += '/details';
       }
       return `https://www.freelancer.com${path}`;
     } catch {
-      return absolute.replace(/\/?$/, '/details');
+      return absolute.replace(/\.html\/?/gi, '/').replace(/\/?$/, '/details');
     }
   }
 
@@ -30,16 +43,21 @@
     const match = cleaned.match(/(?:projects|contest)\/(.+)$/i);
     if (!match) return null;
 
-    const path = match[1].replace(/\/details\/?$/i, '').replace(/\/$/, '');
-    const parts = path.split('/').filter(Boolean);
-    if (!parts.length) return null;
+    const segments = cleanPathSegments(match[1]);
+    if (!segments.length) return null;
 
-    const projectId = parts.length >= 2 ? `${parts[0]}/${parts[1]}` : parts[0];
+    const lastSeg = segments[segments.length - 1];
+    const numericProjectId = /^\d+$/.test(lastSeg) ? Number(lastSeg) : null;
+    const projectId = segments.length >= 2 ? `${segments[0]}/${segments[1]}` : segments[0];
+    const categorySlug = segments.length >= 2 ? segments[0] : '';
+    const projectSlug = segments.length >= 2 ? segments[1] : segments[0];
 
     return {
       projectId,
-      categorySlug: parts.length >= 2 ? parts[0] : '',
-      projectSlug: parts.length >= 2 ? parts[1] : parts[0],
+      numericProjectId,
+      categorySlug,
+      projectSlug,
+      seoUrl: segments.length >= 2 ? `${segments[0]}/${segments[1]}` : segments[0],
       url: normalizeDetailsUrl(href)
     };
   }

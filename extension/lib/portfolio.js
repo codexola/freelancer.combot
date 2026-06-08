@@ -1,8 +1,12 @@
 /**
- * 過去プロジェクトリンクの textarea 解析と入札文の1500文字制限
+ * 過去プロジェクトリンクの解析と入札文の文字数制御
  */
 
+export const MIN_PROPOSAL_LENGTH = 1000;
+export const TARGET_MAX_PROPOSAL_LENGTH = 1400;
 export const MAX_PROPOSAL_LENGTH = 1500;
+export const MIN_PORTFOLIO_LINKS = 2;
+export const MAX_PORTFOLIO_LINKS = 3;
 
 const URL_REGEX = /https?:\/\/[^\s<>"{}|\\^`[\]]+/gi;
 
@@ -16,7 +20,8 @@ const TECH_KEYWORDS = [
   'design', 'logo', 'branding', 'ecommerce', 'e-commerce', 'saas', 'crm',
   'automation', 'scraping', 'machine learning', 'ai', 'blockchain', 'solidity',
   'java', 'spring', 'c#', '.net', 'ruby', 'rails', 'go', 'golang', 'rust',
-  'swift', 'kotlin', 'django', 'flask', 'fastapi', 'express', 'nuxt', 'svelte'
+  'swift', 'kotlin', 'django', 'flask', 'fastapi', 'express', 'nuxt', 'svelte',
+  'elementor', 'woocommerce', 'web development', 'website'
 ];
 
 export function parsePortfolioLinksText(text) {
@@ -84,80 +89,132 @@ export function portfolioLinksToText(links) {
     .join('\n');
 }
 
-export function selectRelevantLinks(project, links, maxLinks = 3) {
-  if (!links?.length) return [];
-
+export function scorePortfolioLink(project, link) {
+  let score = 0;
   const projectText = `${project.title || ''} ${project.description || ''} ${(project.skills || []).join(' ')}`.toLowerCase();
+  const linkText = `${link.url} ${link.title || ''} ${link.description || ''} ${(link.tags || []).join(' ')}`.toLowerCase();
 
-  const scored = links.map((link) => {
-    let score = 0;
-    const linkText = `${link.url} ${link.title || ''} ${link.description || ''} ${(link.tags || []).join(' ')}`.toLowerCase();
-
-    for (const skill of project.skills || []) {
-      if (linkText.includes(skill.toLowerCase())) score += 3;
-    }
-    for (const tag of link.tags || []) {
-      if (projectText.includes(tag.toLowerCase())) score += 2;
-    }
-
-    const words = projectText.split(/\W+/).filter((w) => w.length > 3);
-    for (const word of words) {
-      if (linkText.includes(word)) score += 1;
-    }
-
-    return { link, score };
-  });
-
-  const relevant = scored.filter((s) => s.score > 0).sort((a, b) => b.score - a.score);
-
-  if (relevant.length) {
-    return relevant.slice(0, maxLinks).map((s) => s.link);
+  for (const skill of project.skills || []) {
+    if (linkText.includes(skill.toLowerCase())) score += 4;
+  }
+  for (const tag of link.tags || []) {
+    if (projectText.includes(tag.toLowerCase())) score += 3;
   }
 
-  return [];
+  const words = projectText.split(/\W+/).filter((w) => w.length > 3);
+  for (const word of words) {
+    if (linkText.includes(word)) score += 1;
+  }
+
+  return score;
+}
+
+export function selectRelevantLinks(project, links, minLinks = MIN_PORTFOLIO_LINKS, maxLinks = MAX_PORTFOLIO_LINKS) {
+  if (!links?.length) return [];
+
+  const scored = links
+    .map((link) => ({ link, score: scorePortfolioLink(project, link) }))
+    .sort((a, b) => b.score - a.score);
+
+  const picked = [];
+  for (const { link, score } of scored) {
+    if (picked.length >= maxLinks) break;
+    if (score > 0 || picked.length < minLinks) {
+      picked.push(link);
+    }
+  }
+
+  for (const { link } of scored) {
+    if (picked.length >= maxLinks) break;
+    if (!picked.includes(link)) picked.push(link);
+  }
+
+  return picked.slice(0, maxLinks);
+}
+
+export function getProposalLengthBounds(settings) {
+  const minLen = settings.proposalMinLength ?? MIN_PROPOSAL_LENGTH;
+  const targetMax = settings.proposalMaxLength ?? TARGET_MAX_PROPOSAL_LENGTH;
+  const hardMax = MAX_PROPOSAL_LENGTH;
+  return {
+    minLen: Math.max(500, minLen),
+    targetMax: Math.min(hardMax, Math.max(minLen, targetMax)),
+    hardMax
+  };
 }
 
 export function enforceProposalLimit(text, maxLen = MAX_PROPOSAL_LENGTH) {
   if (!text) return '';
   if (text.length <= maxLen) return text;
-  return text.slice(0, maxLen);
+  const trimmed = text.slice(0, maxLen);
+  const lastSpace = trimmed.lastIndexOf(' ');
+  if (lastSpace > maxLen * 0.85) {
+    return trimmed.slice(0, lastSpace).trimEnd();
+  }
+  return trimmed.trimEnd();
 }
 
-export function finalizeProposal(proposalText, project, settings) {
-  const allLinks = getPortfolioLinks(settings);
-  const relevantLinks = selectRelevantLinks(project, allLinks);
-  let proposal = (proposalText || '').trim();
+function appendPortfolioLinks(proposal, links, hardMax) {
+  if (!links?.length) return proposal;
 
-  const missingLinks = relevantLinks.filter((l) => !proposal.includes(l.url));
+  let result = proposal.trim();
+  const missing = links.filter((l) => !result.includes(l.url));
 
-  if (missingLinks.length) {
-    const urls = missingLinks.map((l) => l.url);
-    const linksBlock = `\n\nRelevant work:\n${urls.join('\n')}`;
-    const totalLen = proposal.length + linksBlock.length;
+  if (!missing.length) return result;
 
-    if (totalLen <= MAX_PROPOSAL_LENGTH) {
-      proposal += linksBlock;
-    } else {
-      const reservedForLinks = urls.join('\n');
-      const header = '\n\nRelevant work:\n';
-      const availableForText = MAX_PROPOSAL_LENGTH - header.length - reservedForLinks.length;
+  const header = '\n\nRelevant past work:\n';
+  const linkLines = missing.map((l) => {
+    const desc = l.description && l.description !== l.title ? ` — ${l.description}` : '';
+    return `${l.url}${desc}`;
+  });
 
-      if (availableForText > 80) {
-        proposal = proposal.slice(0, availableForText).trimEnd() + header + reservedForLinks;
-      } else {
-        let fitted = proposal;
-        for (const url of urls) {
-          const addition = (fitted.includes('Relevant work') ? '\n' : '\n\nRelevant work:\n') + url;
-          if (fitted.length + addition.length <= MAX_PROPOSAL_LENGTH) {
-            if (!fitted.includes('Relevant work')) fitted += '\n\nRelevant work:\n';
-            else fitted += '\n';
-            fitted += url;
-          }
-        }
-        proposal = fitted;
-      }
+  for (const line of linkLines) {
+    const addition = (result.includes('Relevant past work') ? '\n' : header) + line;
+    if (result.length + addition.length <= hardMax) {
+      if (!result.includes('Relevant past work')) result += header;
+      else result += '\n';
+      result += line.replace(/^Relevant past work:\n/, '');
     }
   }
 
-  return enforceProposalLimit(proposal, MAX_PROPOSAL_LENGTH);
+  return result.trim();
+}
+
+export function finalizeProposal(proposalText, project, settings, selectedLinks) {
+  const { minLen, targetMax, hardMax } = getProposalLengthBounds(settings);
+  const links =
+    selectedLinks || selectRelevantLinks(project, getPortfolioLinks(settings));
+
+  let proposal = (proposalText || '').trim();
+  proposal = appendPortfolioLinks(proposal, links, hardMax);
+
+  if (proposal.length > targetMax) {
+    proposal = enforceProposalLimit(proposal, targetMax);
+  }
+  if (proposal.length > hardMax) {
+    proposal = enforceProposalLimit(proposal, hardMax);
+  }
+
+  return {
+    text: proposal,
+    length: proposal.length,
+    linksUsed: links.map((l) => l.url),
+    withinRange: proposal.length >= minLen && proposal.length <= hardMax,
+    minLen,
+    targetMax,
+    hardMax
+  };
+}
+
+export function buildProjectAnalysisSummary(project) {
+  const skills = (project.skills || []).join(', ');
+  const parts = [
+    `Title: ${project.title || 'N/A'}`,
+    `Description: ${project.description || 'N/A'}`,
+    `Budget: ${project.budget || 'N/A'}`,
+    `Type: ${project.bidType || 'fixed'}`,
+    `Skills: ${skills || 'N/A'}`,
+    `Client country: ${project.clientCountry || 'unknown'}`
+  ];
+  return parts.join('\n');
 }

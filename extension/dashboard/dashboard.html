@@ -89,6 +89,22 @@
               <option value="technical">Technical</option>
             </select>
           </div>
+          <div class="form-group">
+            <label>入札文プロンプト（カスタム指示）</label>
+            <p class="hint">Claude / OpenAI が入札文を生成する際の指示。空欄の場合はデフォルトを使用します。</p>
+            <textarea id="proposalPrompt" rows="8" placeholder="例: クライアントの要求を項目ごとに分析し、関連する過去実績リンク2〜3件を自然に含めて入札文を作成してください。"></textarea>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>入札文 最小文字数</label>
+              <input type="number" id="proposalMinLength" min="500" max="1400" value="1000">
+            </div>
+            <div class="form-group">
+              <label>入札文 目標最大文字数</label>
+              <input type="number" id="proposalMaxLength" min="1000" max="1500" value="1400">
+            </div>
+          </div>
+          <p class="hint">入札文は1000〜1400文字を目標とし、1500文字を超えません。API必須（Claude または OpenAI）。</p>
         </div>
 
         <div class="tab-content" id="tab-bid">
@@ -181,7 +197,7 @@
             <textarea id="portfolioLinksText" rows="12" placeholder="https://example.com/project-1&#10;https://example.com/react-ecommerce | React EC site&#10;https://example.com/seo-optimization | SEO project"></textarea>
           </div>
           <p class="hint portfolio-meta" id="portfolioMeta">0 件のリンクを検出</p>
-          <p class="hint">入札文はリンクを含めて1500文字以内に収めます。</p>
+          <p class="hint">入札時にプロジェクト内容と照合し、最も適切なリンク2〜3件のみ自動選択して入札文に含めます。</p>
         </div>
 
         <div class="tab-content" id="tab-filter">

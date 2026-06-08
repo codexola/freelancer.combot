@@ -1,6 +1,6 @@
 /**
  * プロジェクトページでの入札処理
- * f6.png (hourly), f7.png (fixed price) に対応
+ * f4-f5: IP Agreement → f6 (hourly) / f7 (fixed price)
  */
 
 (function () {
@@ -24,39 +24,105 @@
     return true;
   }
 
+  function normalizePageUrl() {
+    let path = window.location.pathname.replace(/\.html/gi, '');
+    if (!/\/details\/?$/i.test(path)) {
+      path = path.replace(/\/?$/, '/details');
+      if (path !== window.location.pathname) {
+        window.location.replace(`${window.location.origin}${path}`);
+        return true;
+      }
+    }
+    return false;
+  }
+
   function findBidForm() {
-    return (
-      document.querySelector('[class*="PlaceBid"], [class*="place-bid"], [class*="BidForm"], form[class*="bid"]') ||
-      document.querySelector('form') ||
-      document.body
+    const section = document.querySelector(
+      '[class*="PlaceBid"], [class*="place-bid"], [class*="BidForm"], [class*="bid-form"]'
     );
+    if (section) return section;
+    const headings = Array.from(document.querySelectorAll('h1, h2, h3, h4, fl-heading, [class*="heading"]'));
+    const bidHeading = headings.find((h) => /place a bid on this project/i.test(h.textContent || ''));
+    if (bidHeading) {
+      return bidHeading.closest('section, form, [class*="card"], [class*="Card"], main') || bidHeading.parentElement;
+    }
+    return document.querySelector('form') || document.body;
   }
 
   function findProposalInput() {
-    return (
-      findInputByContext(['proposal', 'describe', 'best candidate', 'makes you', 'bid text']) ||
-      document.querySelector('textarea')
-    );
+    const textareas = document.querySelectorAll('textarea');
+    for (const ta of textareas) {
+      const ctx = [
+        ta.placeholder,
+        ta.name,
+        ta.id,
+        ta.getAttribute('aria-label'),
+        ta.closest('label')?.textContent,
+        ta.closest('[class*="field"], [class*="Field"]')?.textContent
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      if (/proposal|candidate|best candidate|describe your|makes you|bid text|write my bid/.test(ctx)) {
+        return ta;
+      }
+    }
+    const form = findBidForm();
+    const inForm = form.querySelector('textarea');
+    if (inForm) return inForm;
+    return document.querySelector('textarea');
+  }
+
+  function hasBidFormVisible() {
+    if (findProposalInput()) return true;
+    return /place a bid on this project/i.test(document.body.innerText || '');
   }
 
   function findOpenBidButton() {
     const buttons = document.querySelectorAll('button, fl-button, a, [role="button"]');
     return Array.from(buttons).find((b) => {
       const text = (b.textContent || '').trim();
-      return /bid on this project|place a bid|bid now|submit (?:a )?bid/i.test(text);
+      return (
+        /place a bid on this project|bid on this project|place a bid|bid now/i.test(text) &&
+        !/place bid$/i.test(text)
+      );
     });
   }
 
-  async function openBidFormIfNeeded() {
-    if (findProposalInput()) return true;
+  async function prepareBidPage(settings, maxMs) {
+    const timeout = maxMs || (settings.slowNetworkMode !== false ? 50000 : 20000);
+    const start = Date.now();
 
-    const openBtn = findOpenBidButton();
-    if (openBtn) {
-      openBtn.click();
-      await sleep(1500);
+    while (Date.now() - start < timeout) {
+      if (window.__fabDocumentSigner?.isDocumentSigningPage?.()) {
+        const signResult = await window.__fabDocumentSigner.completeDocumentSigning(settings);
+        if (signResult.needed && !signResult.success) {
+          return { ready: false, error: signResult.error || '書類署名が必要', needsDocumentSign: true };
+        }
+        await sleep(2000);
+        continue;
+      }
+
+      if (hasBidFormVisible() && findProposalInput()) {
+        return { ready: true };
+      }
+
+      const openBtn = findOpenBidButton();
+      if (openBtn) {
+        openBtn.click();
+        await sleep(1500);
+        continue;
+      }
+
+      if (hasBidFormVisible()) {
+        await sleep(1000);
+        if (findProposalInput()) return { ready: true };
+      }
+
+      await sleep(800);
     }
 
-    return !!findProposalInput();
+    return { ready: false, error: '入札フォームを開けませんでした' };
   }
 
   function getBidCount() {
@@ -80,8 +146,9 @@
 
   function extractClientCountry() {
     const aboutSection =
-      document.querySelector('[class*="AboutClient"], [class*="about-client"], [class*="client-info"], [class*="ClientInfo"]') ||
-      document.body;
+      document.querySelector(
+        '[class*="AboutClient"], [class*="about-client"], [class*="client-info"], [class*="ClientInfo"]'
+      ) || document.body;
     const text = aboutSection.textContent || '';
     const locationEl = aboutSection.querySelector(
       '[class*="location"], [class*="Location"], [class*="country"], [class*="Country"], fl-flag'
@@ -100,20 +167,20 @@
   }
 
   function extractProjectLanguage() {
-    const langEl = document.querySelector('[class*="language"], [class*="Language"]');
-    const langText = langEl?.textContent?.trim() || '';
     const postedMatch = document.body.innerText.match(/posted in\s+(\w+)/i);
     if (postedMatch) return postedMatch[1];
-    if (langText) return langText;
-    return '';
+    const langEl = document.querySelector('[class*="language"], [class*="Language"]');
+    return langEl?.textContent?.trim() || '';
   }
 
   function getProjectData() {
     const title =
-      document.querySelector('h1, [class*="project-title"], [class*="ProjectTitle"]')?.textContent?.trim() || '';
+      document.querySelector('h1, [class*="project-title"], [class*="ProjectTitle"]')?.textContent?.trim() ||
+      '';
     const description =
-      document.querySelector('[class*="description"], [class*="Description"], [class*="project-description"]')
-        ?.textContent?.trim() ||
+      document.querySelector(
+        '[class*="description"], [class*="Description"], [class*="project-description"]'
+      )?.textContent?.trim() ||
       document.querySelector('main p')?.textContent?.trim() ||
       '';
     const budget =
@@ -121,7 +188,8 @@
     const skillEls = document.querySelectorAll('[class*="skill"], fl-tag, [class*="Skill"]');
     const skills = Array.from(skillEls).map((el) => el.textContent.trim()).filter(Boolean);
 
-    const isHourly = /per hour|hourly|\/hr|\/hour/i.test(document.body.innerText + budget);
+    const pageText = document.body.innerText + budget;
+    const isHourly = /per hour|hourly|\/hr|\/hour|eur\/hour|usd\/hour/i.test(pageText);
     return {
       title,
       description,
@@ -135,8 +203,8 @@
     };
   }
 
-  function findInputByContext(keywords) {
-    const inputs = document.querySelectorAll('input, textarea, select');
+  function findInputByContext(keywords, root) {
+    const inputs = (root || document).querySelectorAll('input, textarea, select');
     for (const input of inputs) {
       const context = [
         input.placeholder,
@@ -161,24 +229,30 @@
 
     if (isHourly) {
       const rateInput =
-        findInputByContext(['hourly', 'rate', 'per hour', 'amount']) ||
-        form.querySelector('input[type="number"], input[inputmode="decimal"]');
+        findInputByContext(['hourly', 'rate', 'per hour', '/ hour', 'amount'], form) ||
+        Array.from(form.querySelectorAll('input[type="number"], input[inputmode="decimal"]')).find(
+          (el) => !findInputByContext(['delivery', 'days'], el.parentElement)
+        );
       if (!rateInput) missing.push('hourly rate');
       else setInputValue(rateInput, bidData.hourlyRate || settings.defaultHourlyRate);
     } else {
       const amountInput =
-        findInputByContext(['bid amount', 'amount', 'price', 'your bid']) ||
+        findInputByContext(['bid amount', 'amount', 'price', 'your bid', 'this bid'], form) ||
         form.querySelector('input[type="number"], input[inputmode="decimal"]');
       if (!amountInput) missing.push('bid amount');
       else setInputValue(amountInput, bidData.bidAmount || settings.defaultBidAmount);
 
-      const deliveryInput = findInputByContext(['delivery', 'days', 'time', 'period']);
+      const deliveryInput = findInputByContext(
+        ['delivered in', 'delivery', 'days', 'time', 'period'],
+        form
+      );
       if (deliveryInput) {
         setInputValue(deliveryInput, bidData.deliveryDays || settings.defaultDeliveryDays);
       }
     }
 
-    const profileSelect = findInputByContext(['profile', 'select a profile']) ||
+    const profileSelect =
+      findInputByContext(['profile', 'select a profile'], form) ||
       form.querySelector('select, [class*="profile"] select, fl-select');
     if (profileSelect && profileSelect.tagName === 'SELECT') {
       const options = Array.from(profileSelect.options);
@@ -189,7 +263,7 @@
       profileSelect.dispatchEvent(new Event('change', { bubbles: true }));
     }
 
-    const proposalInput = findProposalInput() || form.querySelector('textarea');
+    const proposalInput = findProposalInput();
     if (!proposalInput || !bidData.proposal) missing.push('proposal');
     else setInputValue(proposalInput, String(bidData.proposal).slice(0, 1500));
 
@@ -197,35 +271,38 @@
       return { ok: false, error: `フォーム入力失敗: ${missing.join(', ')} が見つかりません` };
     }
 
-    await sleep(300);
+    await sleep(400);
     return { ok: true };
   }
 
   function findPlaceBidButton() {
     const buttons = document.querySelectorAll('button, fl-button, [role="button"], a[class*="btn"]');
-    return Array.from(buttons).find((b) =>
-      /place\s*bid|submit\s*bid|bid\s*now/i.test(b.textContent)
-    );
+    return Array.from(buttons).find((b) => {
+      const text = (b.textContent || '').trim();
+      return /^place bid$/i.test(text) || /^submit bid$/i.test(text);
+    });
   }
 
   async function clickPlaceBid() {
     const btn = findPlaceBidButton();
     if (!btn) return { success: false, error: 'Place Bidボタンが見つかりません' };
     btn.click();
-    await sleep(1500);
+    await sleep(2000);
     return { success: true };
   }
 
   async function executeBid(bidData, settings) {
-    if (!/\/details\/?$/i.test(window.location.pathname)) {
-      const detailsPath = window.location.pathname.replace(/\/?$/, '/details');
-      window.location.href = `${window.location.origin}${detailsPath}`;
-      await sleep(2500);
+    if (normalizePageUrl()) {
+      await sleep(3000);
     }
 
-    const formReady = await openBidFormIfNeeded();
-    if (!formReady) {
-      return { success: false, error: '入札フォームを開けませんでした' };
+    const pageReady = await prepareBidPage(settings);
+    if (!pageReady.ready) {
+      return {
+        success: false,
+        error: pageReady.error,
+        needsDocumentSign: pageReady.needsDocumentSign
+      };
     }
 
     const projectData = getProjectData();
@@ -251,14 +328,13 @@
       }
     }
 
-    await sleep(1500);
-
-    if (window.__fabDocumentSigner?.isDocumentSigningPage?.()) {
-      return { success: false, needsDocumentSign: true, error: '書類署名が必要' };
-    }
+    await sleep(2000);
 
     const bodyText = document.body.innerText;
-    const successIndicators = /bid placed|successfully placed|your bid has been submitted|bid submitted|入札が完了/i.test(bodyText);
+    const successIndicators =
+      /bid placed|successfully placed|your bid has been submitted|bid submitted|入札が完了/i.test(
+        bodyText
+      );
     const errorEl = document.querySelector(
       '[class*="error"], [class*="Error"], .alert-danger, [role="alert"], fl-alert'
     );

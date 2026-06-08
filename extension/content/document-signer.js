@@ -10,32 +10,55 @@
     return new Promise((r) => setTimeout(r, ms));
   }
 
-  function findByText(text, tag = '*') {
-    const elements = document.querySelectorAll(tag);
-    return Array.from(elements).find((el) =>
-      el.textContent?.trim().toLowerCase().includes(text.toLowerCase()) &&
-      (el.tagName === 'BUTTON' || el.tagName === 'A' || el.getAttribute('role') === 'button' || el.classList.toString().includes('btn'))
+  function findClickableContaining(text) {
+    const lower = text.toLowerCase();
+    const nodes = document.querySelectorAll(
+      'button, a, [role="button"], fl-button, .Button, [class*="btn"], [class*="Button"]'
     );
-  }
-
-  function findButtonContaining(text) {
-    const buttons = document.querySelectorAll('button, a, [role="button"], fl-button, .Button');
-    return Array.from(buttons).find((b) => b.textContent?.includes(text));
+    return Array.from(nodes).find((el) => {
+      const label = (el.textContent || el.getAttribute('aria-label') || '').trim().toLowerCase();
+      return label.includes(lower) && !el.disabled && el.offsetParent !== null;
+    });
   }
 
   function isDocumentSigningPage() {
-    const bodyText = document.body.innerText;
+    const bodyText = document.body.innerText || '';
     return (
-      /add signature|submit document|intellectual property|ip transfer|complete these steps/i.test(bodyText) ||
-      document.querySelector('[class*="sign"], [class*="Sign"], [class*="document-editor"]')
+      /please sign the intellectual property|intellectual property transfer agreement/i.test(bodyText) ||
+      /complete these steps/i.test(bodyText) ||
+      /add signature|submit document/i.test(bodyText) ||
+      !!document.querySelector('[class*="document-editor"], [class*="DocumentEditor"], [class*="sign-document"]')
     );
   }
 
   function isSignatureModalOpen() {
     return (
-      document.querySelector('canvas') &&
-      /add your signature|draw your signature/i.test(document.body.innerText)
+      !!document.querySelector('canvas, [class*="signature-pad"], [class*="SignaturePad"]') &&
+      /add your signature|draw your signature|use your mouse to draw/i.test(document.body.innerText)
     );
+  }
+
+  function isStepComplete(stepLabel) {
+    const body = document.body.innerText || '';
+    if (stepLabel === 'signature' && /full name/i.test(body)) {
+      const sigBtn = findClickableContaining('Add Signature');
+      if (!sigBtn) return true;
+    }
+    const rows = document.querySelectorAll(
+      'li, [class*="step"], [class*="Step"], [class*="checklist"], div, fl-list-item'
+    );
+    for (const row of rows) {
+      const text = (row.textContent || '').toLowerCase();
+      if (!text.includes(stepLabel)) continue;
+      if (
+        row.querySelector(
+          '[class*="check"], [class*="Check"], fl-icon[name="check"], svg[class*="check"], .icon-check'
+        )
+      ) {
+        return true;
+      }
+    }
+    return false;
   }
 
   function drawSignatureOnCanvas(canvas, strokes) {
@@ -50,11 +73,26 @@
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
 
-    const defaultStrokes = strokes?.length ? strokes : [
-      [{ x: w * 0.1, y: h * 0.65 }, { x: w * 0.2, y: h * 0.45 }, { x: w * 0.3, y: h * 0.7 }, { x: w * 0.4, y: h * 0.5 }],
-      [{ x: w * 0.45, y: h * 0.6 }, { x: w * 0.55, y: h * 0.4 }, { x: w * 0.65, y: h * 0.65 }],
-      [{ x: w * 0.7, y: h * 0.55 }, { x: w * 0.8, y: h * 0.45 }, { x: w * 0.9, y: h * 0.6 }]
-    ];
+    const defaultStrokes = strokes?.length
+      ? strokes
+      : [
+          [
+            { x: w * 0.1, y: h * 0.65 },
+            { x: w * 0.2, y: h * 0.45 },
+            { x: w * 0.3, y: h * 0.7 },
+            { x: w * 0.4, y: h * 0.5 }
+          ],
+          [
+            { x: w * 0.45, y: h * 0.6 },
+            { x: w * 0.55, y: h * 0.4 },
+            { x: w * 0.65, y: h * 0.65 }
+          ],
+          [
+            { x: w * 0.7, y: h * 0.55 },
+            { x: w * 0.8, y: h * 0.45 },
+            { x: w * 0.9, y: h * 0.6 }
+          ]
+        ];
 
     for (const stroke of defaultStrokes) {
       ctx.beginPath();
@@ -68,25 +106,49 @@
     canvas.dispatchEvent(new Event('input', { bubbles: true }));
     canvas.dispatchEvent(new Event('change', { bubbles: true }));
     canvas.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    canvas.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+  }
+
+  function setInputValue(el, value) {
+    if (!el) return;
+    el.focus();
+    const nativeSetter = Object.getOwnPropertyDescriptor(
+      el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype,
+      'value'
+    )?.set;
+    if (nativeSetter) nativeSetter.call(el, String(value));
+    else el.value = String(value);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
   }
 
   async function handleAddSignature(settings) {
-    const addBtn = findButtonContaining('Add Signature') || findButtonContaining('+ Add Signature');
+    if (isStepComplete('signature') && !findClickableContaining('Add Signature')) {
+      return true;
+    }
+
+    const addBtn =
+      findClickableContaining('+ Add Signature') || findClickableContaining('Add Signature');
     if (addBtn) {
       addBtn.click();
-      await sleep(800);
+      await sleep(1200);
     }
 
     if (isSignatureModalOpen()) {
-      const canvas = document.querySelector('canvas');
+      const canvas = document.querySelector(
+        'canvas, [class*="signature-pad"] canvas, [class*="Signature"] canvas'
+      );
       if (canvas) {
         drawSignatureOnCanvas(canvas, settings?.signatureStrokes);
-        await sleep(300);
-        const confirmBtn = findButtonContaining('Add Signature') ||
-          document.querySelector('button[class*="primary"], button[type="submit"]');
-        if (confirmBtn && confirmBtn !== addBtn) {
+        await sleep(500);
+        const modal = canvas.closest('[class*="modal"], [class*="Modal"], [role="dialog"]') || document.body;
+        const confirmBtns = modal.querySelectorAll('button, fl-button, [role="button"]');
+        const confirmBtn = Array.from(confirmBtns).find((b) =>
+          /add signature/i.test(b.textContent || '')
+        );
+        if (confirmBtn) {
           confirmBtn.click();
-          await sleep(500);
+          await sleep(1000);
         }
       }
     }
@@ -94,117 +156,128 @@
   }
 
   async function handleAddFullName(settings) {
-    const addNameBtn = findButtonContaining('Add Full Name') || findButtonContaining('+ Add Full Name');
+    if (isStepComplete('full name')) return true;
+
+    const addNameBtn =
+      findClickableContaining('+ Add Full Name') || findClickableContaining('Add Full Name');
     if (addNameBtn) {
       addNameBtn.click();
-      await sleep(500);
+      await sleep(800);
     }
 
-    const nameInputs = document.querySelectorAll('input[type="text"], input:not([type]), textarea');
-    for (const input of nameInputs) {
-      const placeholder = (input.placeholder || '').toLowerCase();
-      const label = (input.closest('label')?.textContent || input.getAttribute('aria-label') || '').toLowerCase();
-      if (placeholder.includes('name') || label.includes('full name') || label.includes('name')) {
-        if (!input.value && settings?.fullName) {
-          input.focus();
-          input.value = settings.fullName;
-          input.dispatchEvent(new Event('input', { bubbles: true }));
-          input.dispatchEvent(new Event('change', { bubbles: true }));
-          await sleep(300);
-          const saveBtn = findButtonContaining('Save') || findButtonContaining('Add') || findButtonContaining('Confirm');
-          if (saveBtn) saveBtn.click();
-          await sleep(500);
-        }
-        return true;
+    const inputs = document.querySelectorAll('input[type="text"], input:not([type]), textarea');
+    for (const input of inputs) {
+      const ctx = [
+        input.placeholder,
+        input.name,
+        input.id,
+        input.getAttribute('aria-label'),
+        input.closest('label')?.textContent,
+        input.closest('[class*="field"], [class*="Field"]')?.textContent
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      if (!/name/.test(ctx) || /username|filename/.test(ctx)) continue;
+      if (!input.value && settings?.fullName) {
+        setInputValue(input, settings.fullName);
+        await sleep(400);
+        const saveBtn =
+          findClickableContaining('Save') ||
+          findClickableContaining('Confirm') ||
+          findClickableContaining('Add');
+        if (saveBtn) saveBtn.click();
+        await sleep(800);
       }
-    }
-
-    const nameField = document.querySelector('[class*="full-name"], [data-field="fullName"]');
-    if (nameField && settings?.fullName) {
-      const input = nameField.querySelector('input') || nameField;
-      if (input.tagName === 'INPUT') {
-        input.value = settings.fullName;
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-      }
+      return true;
     }
     return true;
   }
 
   async function handleAddFullAddress(settings) {
-    const addAddrBtn = findButtonContaining('Add Full Address') || findButtonContaining('+ Add Full Address');
+    if (isStepComplete('full address') || isStepComplete('address')) return true;
+
+    const addAddrBtn =
+      findClickableContaining('+ Add Full Address') || findClickableContaining('Add Full Address');
     if (addAddrBtn) {
       addAddrBtn.click();
-      await sleep(500);
+      await sleep(800);
     }
 
-    const addrInputs = document.querySelectorAll('input[type="text"], textarea');
-    for (const input of addrInputs) {
-      const placeholder = (input.placeholder || '').toLowerCase();
-      const label = (input.closest('label')?.textContent || input.getAttribute('aria-label') || '').toLowerCase();
-      if (placeholder.includes('address') || label.includes('address')) {
-        if (!input.value && settings?.fullAddress) {
-          input.focus();
-          input.value = settings.fullAddress;
-          input.dispatchEvent(new Event('input', { bubbles: true }));
-          input.dispatchEvent(new Event('change', { bubbles: true }));
-          await sleep(300);
-          const saveBtn = findButtonContaining('Save') || findButtonContaining('Add') || findButtonContaining('Confirm');
-          if (saveBtn) saveBtn.click();
-          await sleep(500);
-        }
-        return true;
+    const inputs = document.querySelectorAll('input[type="text"], textarea');
+    for (const input of inputs) {
+      const ctx = [
+        input.placeholder,
+        input.getAttribute('aria-label'),
+        input.closest('label')?.textContent
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      if (!/address/.test(ctx)) continue;
+      if (!input.value && settings?.fullAddress) {
+        setInputValue(input, settings.fullAddress);
+        await sleep(400);
+        const saveBtn = findClickableContaining('Save') || findClickableContaining('Confirm');
+        if (saveBtn) saveBtn.click();
+        await sleep(800);
       }
+      return true;
     }
     return true;
   }
 
   async function submitDocument() {
-    await sleep(500);
-    const submitBtn = findButtonContaining('Submit Document');
-    if (submitBtn && !submitBtn.disabled && !submitBtn.classList.contains('disabled')) {
-      submitBtn.click();
-      await sleep(1000);
-      return true;
-    }
-    return false;
+    await sleep(600);
+    const submitBtn = findClickableContaining('Submit Document');
+    if (!submitBtn) return false;
+    if (submitBtn.disabled || submitBtn.getAttribute('aria-disabled') === 'true') return false;
+    submitBtn.click();
+    await sleep(2000);
+    return true;
   }
 
   function getPendingItems() {
     const pending = [];
-    const bodyText = document.body.innerText;
-    if (/\+?\s*add signature/i.test(bodyText) && !document.querySelector('[class*="signature-complete"], .checkmark')) {
-      const sigDone = document.querySelector('[class*="signature"] .check, fl-icon[name="check"]');
-      if (!sigDone) pending.push('signature');
+    if (!isStepComplete('signature') && findClickableContaining('Add Signature')) {
+      pending.push('signature');
     }
-    if (/\+?\s*add full name/i.test(bodyText)) pending.push('fullName');
-    if (/\+?\s*add full address/i.test(bodyText)) pending.push('fullAddress');
+    if (!isStepComplete('full name') && findClickableContaining('Add Full Name')) {
+      pending.push('fullName');
+    }
+    if (!isStepComplete('address') && findClickableContaining('Add Full Address')) {
+      pending.push('fullAddress');
+    }
     return pending;
   }
 
   async function completeDocumentSigning(settings) {
     if (!isDocumentSigningPage()) return { needed: false };
 
-    const maxAttempts = 5;
+    const maxAttempts = 8;
     for (let i = 0; i < maxAttempts; i++) {
       const pending = getPendingItems();
-      if (pending.includes('signature') || findButtonContaining('Add Signature')) {
-        await handleAddSignature(settings);
-      }
-      if (pending.includes('fullName') || findButtonContaining('Add Full Name')) {
-        await handleAddFullName(settings);
-      }
-      if (pending.includes('fullAddress') || findButtonContaining('Add Full Address')) {
-        await handleAddFullAddress(settings);
-      }
-      await sleep(800);
 
-      const submitted = await submitDocument();
-      if (submitted) return { needed: true, success: true };
+      if (pending.includes('signature')) await handleAddSignature(settings);
+      if (pending.includes('fullName')) await handleAddFullName(settings);
+      if (pending.includes('fullAddress')) await handleAddFullAddress(settings);
 
-      const submitBtn = findButtonContaining('Submit Document');
-      if (submitBtn && !submitBtn.disabled) {
-        submitBtn.click();
-        return { needed: true, success: true };
+      await sleep(1000);
+
+      if (await submitDocument()) {
+        await sleep(2000);
+        if (!isDocumentSigningPage()) {
+          return { needed: true, success: true, message: '書類署名完了' };
+        }
+      }
+
+      if (!getPendingItems().length) {
+        const submitBtn = findClickableContaining('Submit Document');
+        if (submitBtn && !submitBtn.disabled) {
+          submitBtn.click();
+          await sleep(2000);
+          return { needed: true, success: true, message: '書類署名完了' };
+        }
       }
     }
 

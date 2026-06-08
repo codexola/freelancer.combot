@@ -207,7 +207,7 @@ function extractProjectFromCard(card) {
   const link = findBestProjectLink(card);
   if (!link?.parsed) return null;
 
-  const { projectId, url } = link.parsed;
+  const { projectId, url, numericProjectId, seoUrl } = link.parsed;
   const titleEl =
     card.querySelector('h2, h3, h4, [class*="title"], [class*="Title"]') || link.el;
   const title = (titleEl?.textContent || link.el.textContent || '').trim().split('\n')[0].trim();
@@ -237,6 +237,8 @@ function extractProjectFromCard(card) {
 
   return {
     projectId,
+    numericProjectId: numericProjectId || null,
+    seoUrl: seoUrl || projectId,
     url,
     title,
     bidCount,
@@ -266,10 +268,13 @@ function scanProjectsFromLinks() {
 
     const rawTitle = (link.textContent || '').trim().split('\n')[0].trim();
     if (!rawTitle || rawTitle.length < 5 || /^bid\s*now$/i.test(rawTitle)) continue;
+    if (/\.(css|js|png|jpg|svg)$/i.test(parsed.projectSlug || '')) continue;
 
     seen.add(parsed.projectId);
     projects.push({
       projectId: parsed.projectId,
+      numericProjectId: parsed.numericProjectId || null,
+      seoUrl: parsed.seoUrl || parsed.projectId,
       url: parsed.url,
       title: rawTitle,
       bidCount: null,

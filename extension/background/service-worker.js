@@ -32,7 +32,12 @@ import {
   detectProjectLanguage,
   analyzeProjectRequirements
 } from '../lib/filters.js';
-import { finalizeProposal } from '../lib/portfolio.js';
+import {
+  finalizeProposal,
+  getPortfolioLinks,
+  selectRelevantLinks,
+  MAX_PROPOSAL_LENGTH
+} from '../lib/portfolio.js';
 import {
   normalizeDetailsUrl,
   compareProjectsByNewest
@@ -55,6 +60,7 @@ const MONITOR_SCRIPT_FILES = [
   'lib/freelancer-session-content.js',
   'content/projects-monitor.js'
 ];
+const BID_SCRIPT_FILES = ['content/document-signer.js', 'content/bid-handler.js'];
 let bidWorkerTabId = null;
 
 async function injectMonitorScripts(tabId) {
@@ -62,6 +68,17 @@ async function injectMonitorScripts(tabId) {
     target: { tabId },
     files: MONITOR_SCRIPT_FILES
   });
+}
+
+async function ensureBidContentScript(tabId, timeout) {
+  let ready = await waitForContentScript(tabId, timeout);
+  if (ready) return true;
+  try {
+    await chrome.scripting.executeScript({ target: { tabId }, files: BID_SCRIPT_FILES });
+  } catch {
+    return false;
+  }
+  return waitForContentScript(tabId, timeout);
 }
 
 async function ensureContentScript(tabId) {
@@ -620,7 +637,16 @@ async function executeBidFlow(project, settings) {
     let proposal = '';
     try {
       proposal = await generateProposal(settings, projectData);
+      await addBidLog({
+        level: 'info',
+        message: `AI入札文生成完了 (${proposal.length}文字)`,
+        projectId: project.projectId
+      });
     } catch (apiErr) {
+      if (settings.requireAiProposal !== false) {
+        await skipProject(project, 'proposal_generation_failed', `AI入札文生成失敗: ${apiErr.message}`, settings);
+        return;
+      }
       proposal = buildFallbackProposal(projectData, settings);
       await addBidLog({
         level: 'warn',
@@ -648,8 +674,8 @@ async function executeBidFlow(project, settings) {
       const bidUrl = normalizeDetailsUrl(projectData.url || project.url);
       tabId = await ensureBidWorkerTab(bidUrl);
 
-      const scriptTimeout = slowMode ? 35000 : OCTO_CONTENT_SCRIPT_MS;
-      const scriptReady = await waitForContentScript(tabId, scriptTimeout);
+      const scriptTimeout = slowMode ? 50000 : OCTO_CONTENT_SCRIPT_MS;
+      const scriptReady = await ensureBidContentScript(tabId, scriptTimeout);
       if (!scriptReady) {
         await recordFilterStatus(project, 'failed', {
           reason: 'content_script_timeout',
@@ -819,6 +845,10 @@ async function attemptProblemSolve(tabId, project, result, settings) {
 
 function buildFallbackProposal(project, settings) {
   const lang = detectProjectLanguage(project);
+  const links = selectRelevantLinks(project, getPortfolioLinks(settings), 2, 3);
+  const linkBlock = links.length
+    ? `\n\nRelevant past work:\n${links.map((l) => l.url).join('\n')}`
+    : '';
   const templates = {
     English: `Hi, I'm very interested in your project "${project.title}".
 
@@ -843,7 +873,8 @@ J'aimerais discuter de vos exigences plus en détail. Au plaisir de travailler a
 Cordialement`
   };
   const baseText = templates[lang] || templates.English;
-  return finalizeProposal(baseText, project, settings);
+  const result = finalizeProposal(`${baseText}${linkBlock}`, project, settings, links);
+  return result.text || result;
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {

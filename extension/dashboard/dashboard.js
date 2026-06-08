@@ -50,6 +50,7 @@ async function loadAll() {
 function renderSettings() {
   const fields = [
     'preferredAiProvider', 'claudeApiKey', 'openaiApiKey', 'proposalStyle',
+    'proposalPrompt', 'proposalMinLength', 'proposalMaxLength',
     'defaultBidAmount', 'defaultDeliveryDays', 'defaultHourlyRate', 'profileName',
     'bidWindowMinSec', 'bidWindowMaxSec', 'bidExecutionGraceSec', 'maxBidCount',
     'freelancerOAuthToken',
@@ -121,6 +122,10 @@ function collectSettings() {
     claudeApiKey: $('claudeApiKey').value,
     openaiApiKey: $('openaiApiKey').value,
     proposalStyle: $('proposalStyle').value,
+    proposalPrompt: $('proposalPrompt')?.value || '',
+    proposalMinLength: parseInt($('proposalMinLength')?.value, 10) || 1000,
+    proposalMaxLength: parseInt($('proposalMaxLength')?.value, 10) || 1400,
+    requireAiProposal: true,
     defaultBidAmount: parseFloat($('defaultBidAmount').value) || 500,
     defaultDeliveryDays: parseInt($('defaultDeliveryDays').value, 10) || 7,
     defaultHourlyRate: parseFloat($('defaultHourlyRate').value) || 25,

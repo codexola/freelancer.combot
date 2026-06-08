@@ -1,5 +1,5 @@
 /**
- * Claude / OpenAI API クライアント
+ * Claude / OpenAI API クライアント — 入札文生成
  */
 
 import {
@@ -12,8 +12,27 @@ import {
   selectRelevantLinks,
   finalizeProposal,
   enforceProposalLimit,
-  MAX_PROPOSAL_LENGTH
+  buildProjectAnalysisSummary,
+  getProposalLengthBounds,
+  MAX_PROPOSAL_LENGTH,
+  MIN_PORTFOLIO_LINKS,
+  MAX_PORTFOLIO_LINKS
 } from './portfolio.js';
+
+const DEFAULT_PROPOSAL_PROMPT = `You are an expert freelancer on Freelancer.com.
+
+Write a persuasive bid proposal that:
+1. Analyzes the client's specific requirements from the project title and description
+2. Explains clearly how you will deliver exactly what they need (scope, approach, timeline)
+3. Highlights relevant experience without generic fluff
+4. Naturally embeds 2-3 portfolio links from the provided list (only the most relevant ones)
+5. Ends with a professional call to action inviting the client to discuss details`;
+
+const STYLE_HINTS = {
+  professional: 'Tone: confident, professional, concise.',
+  friendly: 'Tone: warm, approachable, collaborative.',
+  technical: 'Tone: technical, precise, solution-oriented with concrete deliverables.'
+};
 
 async function callWithFallback(settings, prompt) {
   const provider = settings.preferredAiProvider || 'claude';
@@ -28,7 +47,7 @@ async function callWithFallback(settings, prompt) {
   }
 
   if (!attempts.length) {
-    throw new Error('Claude または OpenAI の API キーを設定してください');
+    throw new Error('Claude または OpenAI の API キーをダッシュボードに設定してください');
   }
 
   let lastError = null;
@@ -43,58 +62,89 @@ async function callWithFallback(settings, prompt) {
 }
 
 export async function generateProposal(settings, projectData) {
-  const prompt = buildProposalPrompt(projectData, settings);
-  const rawText = await callWithFallback(settings, prompt);
+  const portfolioLinks = getPortfolioLinks(settings);
+  const selectedLinks = selectRelevantLinks(projectData, portfolioLinks, MIN_PORTFOLIO_LINKS, MAX_PORTFOLIO_LINKS);
+  const { minLen, targetMax, hardMax } = getProposalLengthBounds(settings);
+
+  const prompt = buildProposalPrompt(projectData, settings, selectedLinks);
+  let rawText = await callWithFallback(settings, prompt);
+
   if (!rawText?.trim()) {
     throw new Error('AIが空の入札文を返しました');
   }
-  return finalizeProposal(rawText, projectData, settings);
+
+  let finalized = finalizeProposal(rawText, projectData, settings, selectedLinks);
+
+  if (finalized.length < minLen) {
+    const expandPrompt = `${prompt}
+
+IMPORTANT: Your previous draft was only ${finalized.length} characters. Rewrite the FULL proposal with ${minLen}-${targetMax} characters (hard maximum ${hardMax}). Add more specific detail about how you will meet each client requirement. Do not use markdown.`;
+    rawText = await callWithFallback(settings, expandPrompt);
+    finalized = finalizeProposal(rawText, projectData, settings, selectedLinks);
+  }
+
+  if (finalized.length < minLen) {
+    throw new Error(`入札文が短すぎます (${finalized.length}文字 / 最低${minLen}文字)`);
+  }
+
+  if (finalized.length > hardMax) {
+    finalized.text = enforceProposalLimit(finalized.text, hardMax);
+    finalized.length = finalized.text.length;
+  }
+
+  return finalized.text;
 }
 
-function buildProposalPrompt(project, settings) {
-  const portfolioLinks = getPortfolioLinks(settings);
-  const relevantLinks = selectRelevantLinks(project, portfolioLinks);
-  const linksText = relevantLinks.length
-    ? relevantLinks.map((l) => `- ${l.url}${l.description ? ` (${l.description})` : ''}`).join('\n')
-    : 'None';
-
-  const linksCharBudget = relevantLinks.reduce((sum, l) => sum + l.url.length + 2, 0);
-  const textCharBudget = MAX_PROPOSAL_LENGTH - linksCharBudget - 20;
-
+function buildProposalPrompt(project, settings, selectedLinks) {
+  const { minLen, targetMax, hardMax } = getProposalLengthBounds(settings);
+  const customPrompt = settings.proposalPrompt?.trim() || DEFAULT_PROPOSAL_PROMPT;
+  const styleHint = STYLE_HINTS[settings.proposalStyle] || STYLE_HINTS.professional;
+  const requirementAnalysis = analyzeProjectRequirements(project);
   const clientLanguage = detectProjectLanguage(project);
   const languageInstruction = getProposalLanguageInstruction(project);
-  const requirementAnalysis = analyzeProjectRequirements(project);
+  const projectSummary = buildProjectAnalysisSummary(project);
 
-  return `You are a freelancer on Freelancer.com. Write a bid proposal for the project below.
+  const linksBlock = selectedLinks.length
+    ? selectedLinks
+        .map(
+          (l, i) =>
+            `${i + 1}. ${l.url}${l.description ? ` — ${l.description}` : l.title ? ` — ${l.title}` : ''}`
+        )
+        .join('\n')
+    : 'None available — do not invent URLs';
 
-## Requirement analysis (read carefully — do NOT assume category from incidental keywords)
+  const mustIncludeLinks =
+    selectedLinks.length >= MIN_PORTFOLIO_LINKS
+      ? `Include exactly ${Math.min(selectedLinks.length, MAX_PORTFOLIO_LINKS)} of these portfolio URLs inline in the proposal:`
+      : selectedLinks.length
+        ? `Include these portfolio URL(s) inline where relevant:`
+        : 'No portfolio links available.';
+
+  return `${customPrompt}
+
+${styleHint}
+${languageInstruction}
+Client/ad language: ${clientLanguage}
+
+## Project analysis
 Primary work type: ${requirementAnalysis.primaryType}
-Summary: ${requirementAnalysis.summary}
-Focus your proposal on the client's actual technical/deliverable requirements in the title and description.
-Do NOT write a marketing, VA, or adult-content pitch unless that is clearly the primary job.
+Requirement summary: ${requirementAnalysis.summary}
 
-## Constraints
-- The ENTIRE proposal including any portfolio URLs must be ${MAX_PROPOSAL_LENGTH} characters or fewer (strict)
-- Portfolio links count toward the ${MAX_PROPOSAL_LENGTH} character limit
-- Include only portfolio links most relevant to the client's requirements (from the list below)
-- Aim for ~${Math.max(textCharBudget, 200)} characters of proposal text so links fit within ${MAX_PROPOSAL_LENGTH} total
-- Use a natural, persuasive ${settings.proposalStyle || 'professional'} tone
-- ${languageInstruction}
-- Client/ad language detected: ${clientLanguage} — match the client's writing style and vocabulary
+## Client project (analyze every requirement before writing)
+${projectSummary}
 
-## Project
-Title: ${project.title}
-Description: ${project.description}
-Budget: ${project.budget}
-Skills: ${(project.skills || []).join(', ')}
-Bid type: ${project.bidType || 'fixed'}
-Client country: ${project.clientCountry || 'unknown'}
+## Portfolio links to use (${MIN_PORTFOLIO_LINKS}-${MAX_PORTFOLIO_LINKS} most relevant only)
+${mustIncludeLinks}
+${linksBlock}
 
-## Available portfolio links (include only relevant ones in the proposal)
-${linksText}
+## Length rules (STRICT)
+- Total length including URLs must be between ${minLen} and ${targetMax} characters
+- NEVER exceed ${hardMax} characters (Freelancer hard limit ${MAX_PROPOSAL_LENGTH})
+- Count every character including spaces and line breaks
+- Write ${minLen}-${targetMax} characters — not shorter, not longer
 
 ## Output
-Return only the proposal text with relevant links included inline. No explanations or markdown. Total length must not exceed ${MAX_PROPOSAL_LENGTH} characters.`;
+Return ONLY the final bid proposal text. No markdown, no headings, no "Here is your proposal", no explanations.`;
 }
 
 async function callClaude(apiKey, prompt) {
@@ -108,7 +158,7 @@ async function callClaude(apiKey, prompt) {
     },
     body: JSON.stringify({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 2000,
+      max_tokens: 2200,
       messages: [{ role: 'user', content: prompt }]
     })
   });
@@ -117,8 +167,7 @@ async function callClaude(apiKey, prompt) {
     throw new Error(`Claude API error: ${res.status} ${err}`);
   }
   const data = await res.json();
-  const text = data.content?.[0]?.text || '';
-  return enforceProposalLimit(text, MAX_PROPOSAL_LENGTH);
+  return cleanAiOutput(data.content?.[0]?.text || '');
 }
 
 async function callOpenAI(apiKey, prompt) {
@@ -130,7 +179,7 @@ async function callOpenAI(apiKey, prompt) {
     },
     body: JSON.stringify({
       model: 'gpt-4o',
-      max_tokens: 2000,
+      max_tokens: 2200,
       messages: [{ role: 'user', content: prompt }]
     })
   });
@@ -139,18 +188,23 @@ async function callOpenAI(apiKey, prompt) {
     throw new Error(`OpenAI API error: ${res.status} ${err}`);
   }
   const data = await res.json();
-  const text = data.choices?.[0]?.message?.content || '';
-  return enforceProposalLimit(text, MAX_PROPOSAL_LENGTH);
+  return cleanAiOutput(data.choices?.[0]?.message?.content || '');
+}
+
+function cleanAiOutput(text) {
+  return text
+    .replace(/^```[\w]*\n?/gm, '')
+    .replace(/```$/gm, '')
+    .replace(/^\s*here(?:'s| is) (?:your |the )?proposal:?\s*/i, '')
+    .trim();
 }
 
 const WORKFLOW_REFERENCE = `
 既知のワークフロー:
-1. プロジェクト一覧(f8): 新規プロジェクト検出、入札者数<50、投稿3-10秒以内
-2. 固定価格入札(f7): 金額、納期、プロフィール、提案文(1500文字)、Place Bid
+1. プロジェクト一覧(f8): 新規プロジェクト検出
+2. 固定価格入札(f7): 金額、納期、プロフィール、提案文、Place Bid
 3. 時給入札(f6): 時給、プロフィール、提案文、Place Bid
-4. IP Agreement(f4): +Add Signature, +Add Full Name ボタンをクリック
-5. 署名モーダル(f2): canvasに署名を描画し「Add Signature」クリック
-6. 契約書(f1,f3,f5): Signature, Full Name, Full Address を追加後 Submit Document
+4. IP Agreement(f4-f5): 署名・氏名・住所 → Submit Document
 `;
 
 export async function analyzeProblem(settings, screenshotBase64, context) {
