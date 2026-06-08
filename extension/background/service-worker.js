@@ -16,7 +16,9 @@ import {
   addFilterStatusEntry,
   getFilterStatus,
   clearFilterStatus,
-  deleteFilterStatusEntry
+  deleteFilterStatusEntry,
+  deleteSettings,
+  deleteStats
 } from '../lib/storage.js';
 import { generateProposal, analyzeProblem } from '../lib/api-clients.js';
 import { solveProblem } from '../lib/problem-solver.js';
@@ -535,7 +537,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         sendResponse(await getStats());
         break;
       case 'DELETE_SETTINGS':
-        const { deleteSettings, deleteStats } = await import('../lib/storage.js');
         if (msg.target === 'stats') await deleteStats();
         else await deleteSettings();
         sendResponse({ ok: true });
