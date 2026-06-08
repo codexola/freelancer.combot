@@ -445,13 +445,41 @@ export function getProjectAgeSeconds(project) {
 
 export function evaluateAgeWindow(project, settings) {
   const minAge = settings.bidWindowMinSec ?? 3;
-  const maxAge = settings.bidWindowMaxSec ?? 10;
+  const maxAge = settings.bidWindowMaxSec ?? 120;
   const ageSec = getProjectAgeSeconds(project);
 
   if (ageSec == null) {
-    if (project.detectedAt) {
-      return { pass: true, ageSec: 0, usedDetectionTime: true };
+    if (project.isListedOld) {
+      return {
+        pass: false,
+        reason: 'listing_not_new',
+        message: '掲載期間のみ表示（新規投稿ではない）',
+        defer: false
+      };
     }
+
+    if (project.isNewDetection && project.detectedAt) {
+      const detectedAge = Math.floor((Date.now() - project.detectedAt) / 1000);
+      if (detectedAge < minAge) {
+        return {
+          pass: false,
+          reason: `too_young_${detectedAge}s`,
+          message: `検出から${minAge}秒未満 (${detectedAge}秒)`,
+          defer: true,
+          retryInMs: Math.max(200, (minAge - detectedAge) * 1000 + 300)
+        };
+      }
+      if (detectedAge > maxAge) {
+        return {
+          pass: false,
+          reason: `too_old_${detectedAge}s`,
+          message: `検出から${maxAge}秒超過 (${detectedAge}秒)`,
+          defer: false
+        };
+      }
+      return { pass: true, ageSec: detectedAge, usedDetectionTime: true };
+    }
+
     return { pass: false, reason: 'age_unknown', message: '投稿時刻を判定できません', defer: false };
   }
   if (ageSec < minAge) {

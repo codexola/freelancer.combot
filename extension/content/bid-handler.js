@@ -26,10 +26,37 @@
 
   function findBidForm() {
     return (
-      document.querySelector('[class*="PlaceBid"], [class*="place-bid"], form[class*="bid"]') ||
+      document.querySelector('[class*="PlaceBid"], [class*="place-bid"], [class*="BidForm"], form[class*="bid"]') ||
       document.querySelector('form') ||
       document.body
     );
+  }
+
+  function findProposalInput() {
+    return (
+      findInputByContext(['proposal', 'describe', 'best candidate', 'makes you', 'bid text']) ||
+      document.querySelector('textarea')
+    );
+  }
+
+  function findOpenBidButton() {
+    const buttons = document.querySelectorAll('button, fl-button, a, [role="button"]');
+    return Array.from(buttons).find((b) => {
+      const text = (b.textContent || '').trim();
+      return /bid on this project|place a bid|bid now|submit (?:a )?bid/i.test(text);
+    });
+  }
+
+  async function openBidFormIfNeeded() {
+    if (findProposalInput()) return true;
+
+    const openBtn = findOpenBidButton();
+    if (openBtn) {
+      openBtn.click();
+      await sleep(1500);
+    }
+
+    return !!findProposalInput();
   }
 
   function getBidCount() {
@@ -162,9 +189,7 @@
       profileSelect.dispatchEvent(new Event('change', { bubbles: true }));
     }
 
-    const proposalInput =
-      findInputByContext(['proposal', 'describe', 'best candidate', 'makes you', 'bid text']) ||
-      form.querySelector('textarea');
+    const proposalInput = findProposalInput() || form.querySelector('textarea');
     if (!proposalInput || !bidData.proposal) missing.push('proposal');
     else setInputValue(proposalInput, String(bidData.proposal).slice(0, 1500));
 
@@ -192,6 +217,17 @@
   }
 
   async function executeBid(bidData, settings) {
+    if (!/\/details\/?$/i.test(window.location.pathname)) {
+      const detailsPath = window.location.pathname.replace(/\/?$/, '/details');
+      window.location.href = `${window.location.origin}${detailsPath}`;
+      await sleep(2500);
+    }
+
+    const formReady = await openBidFormIfNeeded();
+    if (!formReady) {
+      return { success: false, error: '入札フォームを開けませんでした' };
+    }
+
     const projectData = getProjectData();
 
     if (projectData.bidCount != null && projectData.bidCount >= (settings.maxBidCount || 50)) {

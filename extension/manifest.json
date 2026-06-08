@@ -38,6 +38,7 @@
     {
       "matches": ["https://www.freelancer.com/search/projects*"],
       "js": ["content/projects-monitor.js"],
+      "type": "module",
       "run_at": "document_idle"
     },
     {

@@ -225,3 +225,39 @@ export async function deleteFilterStatusEntry(entryId) {
   broadcastFilterStatus(filtered);
   return filtered;
 }
+
+const ARCHIVE_KEY = 'projectArchive';
+const MAX_ARCHIVE_ENTRIES = 5000;
+
+export async function getProjectArchive() {
+  const result = await chrome.storage.local.get([ARCHIVE_KEY]);
+  return result[ARCHIVE_KEY] || {};
+}
+
+export async function saveProjectArchiveEntry(projectId, entry) {
+  const archive = await getProjectArchive();
+  archive[projectId] = {
+    ...archive[projectId],
+    ...entry,
+    projectId,
+    updatedAt: Date.now()
+  };
+
+  const keys = Object.keys(archive);
+  if (keys.length > MAX_ARCHIVE_ENTRIES) {
+    const sorted = keys.sort((a, b) => (archive[a].updatedAt || 0) - (archive[b].updatedAt || 0));
+    sorted.slice(0, keys.length - MAX_ARCHIVE_ENTRIES).forEach((k) => delete archive[k]);
+  }
+
+  await chrome.storage.local.set({ [ARCHIVE_KEY]: archive });
+  return archive[projectId];
+}
+
+export async function isProjectArchived(projectId) {
+  const archive = await getProjectArchive();
+  return !!archive[projectId];
+}
+
+export async function getArchivedProjectIds() {
+  return Object.keys(await getProjectArchive());
+}

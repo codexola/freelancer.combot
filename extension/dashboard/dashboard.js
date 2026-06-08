@@ -24,7 +24,9 @@ const FILTER_STATUS_LABELS = {
   bidding: 'BID',
   skipped: 'SKIP',
   success: 'OK',
-  failed: 'FAIL'
+  failed: 'FAIL',
+  seeded: 'SEED',
+  archived: 'ARCHIVE'
 };
 
 let renderedFilterIds = new Set();

@@ -18,7 +18,10 @@ import {
   clearFilterStatus,
   deleteFilterStatusEntry,
   deleteSettings,
-  deleteStats
+  deleteStats,
+  isProjectArchived,
+  saveProjectArchiveEntry,
+  getArchivedProjectIds
 } from '../lib/storage.js';
 import { generateProposal, analyzeProblem } from '../lib/api-clients.js';
 import { solveProblem } from '../lib/problem-solver.js';
@@ -29,8 +32,13 @@ import {
   analyzeProjectRequirements
 } from '../lib/filters.js';
 import { finalizeProposal } from '../lib/portfolio.js';
+import {
+  normalizeDetailsUrl,
+  compareProjectsByNewest
+} from '../lib/project-url.js';
 
 const PROJECTS_URL = 'https://www.freelancer.com/search/projects?projectSort=latest';
+const PROJECTS_URL_ALT = 'https://www.freelancer.com/search/projects';
 let monitorTabId = null;
 const bidQueue = [];
 let isProcessingBid = false;
@@ -43,7 +51,10 @@ async function ensureMonitorTab() {
   if (tabs.length > 0) {
     monitorTabId = tabs[0].id;
     const tab = await chrome.tabs.get(monitorTabId);
-    if (!tab.url?.includes('projectSort=latest')) {
+    const onSearchPage =
+      tab.url?.includes('freelancer.com/search/projects') &&
+      (tab.url?.includes('projectSort=latest') || tab.url === PROJECTS_URL_ALT || tab.url === `${PROJECTS_URL_ALT}/`);
+    if (!onSearchPage) {
       await chrome.tabs.update(monitorTabId, { url: PROJECTS_URL });
       await waitForTabLoad(monitorTabId);
       await waitForContentScript(monitorTabId);
@@ -140,10 +151,19 @@ async function waitForContentScript(tabId, timeout = 12000) {
   return false;
 }
 
+function normalizeProject(project) {
+  const url = normalizeDetailsUrl(project.url || '');
+  return {
+    ...project,
+    url: url || project.url,
+    isNewDetection: project.isNewDetection !== false
+  };
+}
+
 async function filterProject(project, settings) {
   const processed = await getProcessedProjects();
   const existing = processed[project.projectId];
-  if (existing && !['queued', 'bidding'].includes(existing.status)) {
+  if (existing && !['queued', 'bidding', 'deferred'].includes(existing.status)) {
     return { pass: false, reason: 'already_processed' };
   }
   if (await isProjectInFlight(project.projectId)) {
@@ -209,23 +229,8 @@ function schedulePendingRetries() {
     }
 
     for (const item of ready) {
-      const { pass, reason, message, defer, retryInMs, requirementAnalysis } = await filterProject(
-        item.project,
-        item.settings
-      );
-      const reqMsg = requirementAnalysis?.summary || '';
-      if (pass) {
-        await recordFilterStatus(item.project, 'passed', { message: `フィルター通過 — ${reqMsg}` });
-        await enqueueProject(item.project, item.settings);
-      } else if (defer && retryInMs) {
-        await recordFilterStatus(item.project, 'deferred', { reason, message: `${message} — ${reqMsg}` });
-        scheduleYoungProjectRetry(item.project, item.settings, retryInMs);
-      } else {
-        await recordFilterStatus(item.project, 'skipped', { reason, message: message || reason });
-        if (reason !== 'already_processed' && reason !== 'already_queued') {
-          await markProjectProcessed(item.project.projectId, reason);
-        }
-      }
+      await markProjectProcessed(item.project.projectId, 'deferred');
+      await processProjectThroughPipeline(item.project, item.settings, { isNew: false });
     }
 
     await processBidQueue();
@@ -238,8 +243,15 @@ async function enqueueProject(project, settings) {
 
   await markProjectProcessed(project.projectId, 'queued');
   bidQueue.push({ project, settings });
+  bidQueue.sort((a, b) => compareProjectsByNewest(a.project, b.project));
   await recordFilterStatus(project, 'queued', {
-    message: `入札キューに追加 (${project.bidCount ?? '?'} bids)`
+    message: `入札キューに追加 (${project.bidCount ?? '?'} bids) — ${project.url}`
+  });
+  await saveProjectArchiveEntry(project.projectId, {
+    title: project.title,
+    url: project.url,
+    status: 'queued',
+    bidCount: project.bidCount
   });
   await addBidLog({
     level: 'info',
@@ -249,41 +261,105 @@ async function enqueueProject(project, settings) {
   return true;
 }
 
-async function handleDetectedProjects(projects) {
+async function archiveProjectResult(project, status, details = {}) {
+  await saveProjectArchiveEntry(project.projectId, {
+    title: project.title,
+    url: project.url,
+    status,
+    bidCount: project.bidCount,
+    reason: details.reason || '',
+    message: details.message || status,
+    source: project.source || 'monitor'
+  });
+}
+
+async function processProjectThroughPipeline(project, settings, { isNew = true } = {}) {
+  const normalized = normalizeProject({ ...project, isNewDetection: isNew });
+  const reqPreview = analyzeProjectRequirements(normalized);
+
+  if (isNew) {
+    await recordFilterStatus(normalized, 'detected', {
+      message: `新規検出 [${normalized.source || 'monitor'}] ${normalized.budget || 'budget?'} / ${normalized.bidCount ?? '?'} bids — ${reqPreview.summary}`
+    });
+  }
+
+  const { pass, reason, message, defer, retryInMs, requirementAnalysis } = await filterProject(
+    normalized,
+    settings
+  );
+  const reqMsg = requirementAnalysis?.summary || reqPreview.summary;
+  let archiveStatus = reason || 'skipped';
+
+  if (pass) {
+    archiveStatus = 'passed';
+    await recordFilterStatus(normalized, 'passed', { message: `フィルター通過 — ${reqMsg}` });
+    await archiveProjectResult(normalized, archiveStatus, { message: reqMsg });
+    await enqueueProject(normalized, settings);
+  } else if (defer && retryInMs) {
+    archiveStatus = 'deferred';
+    await markProjectProcessed(normalized.projectId, 'deferred');
+    await recordFilterStatus(normalized, 'deferred', { reason, message: `${message} — ${reqMsg}` });
+    await archiveProjectResult(normalized, archiveStatus, { reason, message });
+    scheduleYoungProjectRetry(normalized, settings, retryInMs);
+  } else {
+    const quiet = reason === 'already_processed' || reason === 'already_queued';
+    if (!quiet || isNew) {
+      await recordFilterStatus(normalized, 'skipped', {
+        reason,
+        message: message || reason || 'filtered out',
+        level: quiet ? 'info' : 'warn'
+      });
+    }
+    await archiveProjectResult(normalized, archiveStatus, { reason, message: message || reason });
+    if (!quiet) {
+      await markProjectProcessed(normalized.projectId, reason);
+    }
+  }
+
+  return { pass, reason };
+}
+
+async function handleDetectedProjects(projects, { seedBaseline = false } = {}) {
   const settings = await getSettings();
   if (!settings.isRunning) return { ok: false, reason: 'not_running' };
 
   await clearStaleQueuedProjects();
 
-  for (const project of projects) {
-    const reqPreview = analyzeProjectRequirements(project);
-    await recordFilterStatus(project, 'detected', {
-      message: `新規検出 [${project.source || 'monitor'}] ${project.budget || 'budget?'} / ${project.bidCount ?? '?'} bids — ${reqPreview.summary}`
-    });
+  const sorted = [...projects]
+    .map((p) => normalizeProject(p))
+    .sort(compareProjectsByNewest);
 
-    const { pass, reason, message, defer, retryInMs, requirementAnalysis } = await filterProject(project, settings);
-    const reqMsg = requirementAnalysis?.summary || reqPreview.summary;
-
-    if (pass) {
-      await recordFilterStatus(project, 'passed', { message: `フィルター通過 — ${reqMsg}` });
-      await enqueueProject(project, settings);
-    } else if (defer && retryInMs) {
-      await recordFilterStatus(project, 'deferred', { reason, message: `${message} — ${reqMsg}` });
-      scheduleYoungProjectRetry(project, settings, retryInMs);
-    } else {
-      await recordFilterStatus(project, 'skipped', {
-        reason,
-        message: message || reason || 'filtered out',
-        level: reason === 'already_processed' || reason === 'already_queued' ? 'info' : 'warn'
+  if (seedBaseline) {
+    for (const project of sorted) {
+      await saveProjectArchiveEntry(project.projectId, {
+        title: project.title,
+        url: project.url,
+        status: 'seeded',
+        bidCount: project.bidCount,
+        source: project.source || 'monitor'
       });
-      if (reason !== 'already_processed' && reason !== 'already_queued') {
-        await markProjectProcessed(project.projectId, reason);
-      }
+      await markProjectProcessed(project.projectId, 'seeded');
     }
+    await addFilterStatusEntry({
+      status: 'scan',
+      level: 'info',
+      title: 'ARCHIVE',
+      message: `Baseline seeded: ${sorted.length} projects archived`
+    });
+    return { ok: true, seeded: sorted.length };
   }
 
-  await processBidQueue();
-  return { ok: true, queued: bidQueue.length };
+  let queued = 0;
+  for (const project of sorted) {
+    const archived = await isProjectArchived(project.projectId);
+    if (archived) continue;
+
+    const result = await processProjectThroughPipeline(project, settings, { isNew: true });
+    if (result.pass) queued++;
+  }
+
+  void processBidQueue();
+  return { ok: true, queued: bidQueue.length, processed: sorted.length };
 }
 
 async function processBidQueue() {
@@ -305,7 +381,8 @@ async function executeBidFlow(project, settings) {
   try {
     await markProjectProcessed(project.projectId, 'bidding');
     await recordFilterStatus(project, 'bidding', { message: '入札処理中' });
-    tab = await chrome.tabs.create({ url: project.url, active: false });
+    const bidUrl = normalizeDetailsUrl(project.url);
+    tab = await chrome.tabs.create({ url: bidUrl, active: false });
     await waitForTabLoad(tab.id);
 
     const scriptReady = await waitForContentScript(tab.id);
@@ -409,7 +486,12 @@ async function executeBidFlow(project, settings) {
     }
 
     const elapsed = Date.now() - startTime;
-    await markProjectProcessed(project.projectId, result?.success ? 'bid_placed' : 'failed');
+    const finalStatus = result?.success ? 'bid_placed' : result?.skipped ? 'skipped' : 'failed';
+    await markProjectProcessed(project.projectId, finalStatus);
+    await archiveProjectResult(project, finalStatus, {
+      reason: result?.reason || result?.error,
+      message: result?.message || result?.error || result?.reason || '完了'
+    });
     await recordFilterStatus(project, result?.success ? 'success' : result?.skipped ? 'skipped' : 'failed', {
       reason: result?.reason || result?.error,
       message: result?.message || result?.error || result?.reason || '完了'
@@ -452,6 +534,10 @@ async function executeBidFlow(project, settings) {
       await sleep(2000);
       chrome.tabs.remove(tab.id).catch(() => {});
     }
+    if (monitorTabId) {
+      chrome.tabs.sendMessage(monitorTabId, { type: 'SCAN_PROJECTS' }).catch(() => {});
+    }
+    void processBidQueue();
   }
 }
 
@@ -569,7 +655,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         sendResponse({ ok: true });
         break;
       case 'NEW_PROJECTS_DETECTED': {
-        sendResponse(await handleDetectedProjects(msg.projects || []));
+        sendResponse(
+          await handleDetectedProjects(msg.projects || [], { seedBaseline: !!msg.seedBaseline })
+        );
+        break;
+      }
+      case 'GET_ARCHIVE_IDS': {
+        sendResponse({ ids: await getArchivedProjectIds() });
         break;
       }
       case 'MONITOR_SCAN_RESULT': {
