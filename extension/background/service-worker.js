@@ -39,6 +39,9 @@ import {
 
 const PROJECTS_URL = 'https://www.freelancer.com/search/projects?projectSort=latest';
 const PROJECTS_URL_ALT = 'https://www.freelancer.com/search/projects';
+// Octo Browser profiles start slower than desktop Chrome — use longer readiness timeouts.
+const OCTO_TAB_LOAD_MS = 30000;
+const OCTO_CONTENT_SCRIPT_MS = 20000;
 let monitorTabId = null;
 const bidQueue = [];
 let isProcessingBid = false;
@@ -55,7 +58,7 @@ async function injectMonitorScripts(tabId) {
 }
 
 async function ensureContentScript(tabId) {
-  let ready = await waitForContentScript(tabId, 6000);
+  let ready = await waitForContentScript(tabId, 12000);
   if (ready) return true;
 
   await addFilterStatusEntry({
@@ -77,13 +80,14 @@ async function ensureContentScript(tabId) {
     return false;
   }
 
-  ready = await waitForContentScript(tabId, 12000);
+  ready = await waitForContentScript(tabId, OCTO_CONTENT_SCRIPT_MS);
   if (!ready) {
     await addFilterStatusEntry({
       status: 'failed',
       level: 'error',
       title: 'SYSTEM',
-      message: 'Monitor script failed to start after injection'
+      message:
+        'Monitor script failed to start. In Octo profile settings enable Storages: Extensions, Local Storage, Service workers — then reload the extension.'
     });
   }
   return ready;
@@ -145,7 +149,7 @@ async function ensureMonitorTab() {
   return tab.id;
 }
 
-function waitForTabLoad(tabId, timeout = 15000) {
+function waitForTabLoad(tabId, timeout = OCTO_TAB_LOAD_MS) {
   return new Promise((resolve) => {
     const timer = setTimeout(() => resolve(), timeout);
     const listener = (id, info) => {
@@ -164,7 +168,7 @@ async function startBot() {
   await addFilterStatusEntry({
     status: 'system',
     level: 'info',
-    message: `Bot started — monitoring ${PROJECTS_URL}`,
+    message: `Bot started (Octo profile) — monitoring ${PROJECTS_URL}`,
     title: 'SYSTEM'
   });
   const tabId = await ensureMonitorTab();
@@ -212,7 +216,7 @@ async function recordFilterStatus(project, status, details = {}) {
   });
 }
 
-async function waitForContentScript(tabId, timeout = 12000) {
+async function waitForContentScript(tabId, timeout = OCTO_CONTENT_SCRIPT_MS) {
   const start = Date.now();
   while (Date.now() - start < timeout) {
     const res = await chrome.tabs.sendMessage(tabId, { type: 'PING' }).catch(() => null);

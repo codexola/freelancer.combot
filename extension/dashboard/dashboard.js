@@ -170,7 +170,7 @@ function renderFilterStatus(forceRebuild = false) {
   }
 
   if (!currentFilterStatus.length) {
-    body.innerHTML = '<div class="cmd-line cmd-system"><span class="cmd-time">[--:--:--]</span> <span class="cmd-tag">[SYSTEM]</span><span class="cmd-detail">Waiting for bot activity. Click 開始 to start monitoring.</span><span class="cmd-cursor"></span></div>';
+    body.innerHTML = '<div class="cmd-line cmd-system"><span class="cmd-time">[--:--:--]</span> <span class="cmd-tag">[SYSTEM]</span><span class="cmd-detail">Octo Browser プロファイルで 開始 を押してください。Storages で Extensions / Local Storage / Service workers を有効にしてください。</span><span class="cmd-cursor"></span></div>';
     renderedFilterIds.clear();
     return;
   }

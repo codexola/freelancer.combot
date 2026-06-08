@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Freelancer Auto Bid",
   "version": "1.0.0",
-  "description": "Freelancer.comの新規プロジェクトを監視し、自動入札を行う拡張機能",
+  "description": "Freelancer.comの新規プロジェクトを監視し、Octo Browserプロファイル内で自動入札を行う拡張機能",
   "permissions": [
     "storage",
     "tabs",
