@@ -9,23 +9,15 @@
   const SEEN_KEY = 'fab_seen_projects';
   let isMonitoring = false;
   let observer = null;
+  let scanIntervalId = null;
+  let seenProjectIds = new Set();
+  let hasSeededSeen = false;
 
   function parseBidCount(text) {
-    if (!text) return 999;
+    if (!text) return null;
     const match = text.match(/(\d+)\s*bids?/i);
-    return match ? parseInt(match[1], 10) : 0;
+    return match ? parseInt(match[1], 10) : null;
   }
-
-  const EXCLUDED_COUNTRIES = [
-    'india', 'pakistan', 'algeria', 'angola', 'benin', 'botswana', 'burkina faso', 'burundi',
-    'cameroon', 'cape verde', 'central african republic', 'chad', 'comoros', 'congo',
-    'democratic republic of the congo', 'djibouti', 'egypt', 'equatorial guinea', 'eritrea',
-    'eswatini', 'ethiopia', 'gabon', 'gambia', 'ghana', 'guinea', 'guinea-bissau',
-    'ivory coast', 'kenya', 'lesotho', 'liberia', 'libya', 'madagascar', 'malawi', 'mali',
-    'mauritania', 'mauritius', 'morocco', 'mozambique', 'namibia', 'niger', 'nigeria',
-    'rwanda', 'senegal', 'seychelles', 'sierra leone', 'somalia', 'south africa',
-    'south sudan', 'sudan', 'tanzania', 'togo', 'tunisia', 'uganda', 'zambia', 'zimbabwe'
-  ];
 
   function parseBudgetMinUsd(budgetText) {
     if (!budgetText) return 0;
@@ -45,32 +37,33 @@
   }
 
   function extractClientCountry(card) {
+    const locationEl = card.querySelector(
+      '[class*="location"], [class*="Location"], [class*="country"], [class*="Country"], fl-flag'
+    );
+    const locationText = (locationEl?.textContent || locationEl?.getAttribute('title') || '').trim();
+    if (locationText) return locationText;
+
     const text = card.textContent || '';
-    const locationEl = card.querySelector('[class*="location"], [class*="Location"], [class*="country"], [class*="Country"]');
-    const locationText = (locationEl?.textContent || '').trim();
-    const candidates = [locationText, text];
-    for (const c of EXCLUDED_COUNTRIES) {
-      for (const src of candidates) {
-        if (src.toLowerCase().includes(c)) return c;
-      }
-    }
-    const flagMatch = text.match(/(?:from|in|client[:\s]+)\s*([A-Za-z\s]{3,30})/i);
-    return flagMatch ? flagMatch[1].trim() : locationText || '';
+    const flagMatch = text.match(/(?:from|in|client[:\s]+)\s*([A-Za-z][A-Za-z\s]{2,30})/i);
+    return flagMatch ? flagMatch[1].trim() : '';
   }
 
   function parseTimeAgo(text) {
-    if (!text) return Infinity;
+    if (!text) return null;
     const lower = text.toLowerCase().trim();
-    if (lower.includes('just now') || lower.includes('seconds ago')) {
+    if (lower.includes('just now')) return 0;
+    if (lower.includes('seconds ago') || lower.includes('second ago')) {
       const secMatch = lower.match(/(\d+)\s*seconds?\s*ago/);
       return secMatch ? parseInt(secMatch[1], 10) : 0;
     }
-    if (lower.includes('a minute ago') || lower.includes('1 minute')) return 60;
+    if (lower.includes('a minute ago') || lower === '1 minute ago') return 60;
     const minMatch = lower.match(/(\d+)\s*minutes?\s*ago/);
     if (minMatch) return parseInt(minMatch[1], 10) * 60;
     const hourMatch = lower.match(/(\d+)\s*hours?\s*ago/);
     if (hourMatch) return parseInt(hourMatch[1], 10) * 3600;
-    return Infinity;
+    const dayMatch = lower.match(/(\d+)\s*days?\s*ago/);
+    if (dayMatch) return parseInt(dayMatch[1], 10) * 86400;
+    return null;
   }
 
   function extractProjectFromCard(card) {
@@ -149,7 +142,22 @@
     return projects;
   }
 
+  function loadSeenProjects() {
+    return new Promise((resolve) => {
+      chrome.storage.local.get([SEEN_KEY], (result) => {
+        seenProjectIds = new Set(result[SEEN_KEY] || []);
+        resolve();
+      });
+    });
+  }
+
+  function saveSeenProjects() {
+    const ids = Array.from(seenProjectIds).slice(-5000);
+    chrome.storage.local.set({ [SEEN_KEY]: ids });
+  }
+
   function notifyNewProjects(projects) {
+    if (!projects.length) return;
     chrome.runtime.sendMessage({
       type: 'NEW_PROJECTS_DETECTED',
       projects,
@@ -157,42 +165,77 @@
     }).catch(() => {});
   }
 
-  function startMonitoring() {
+  function runScan() {
+    if (!isMonitoring) return;
+    const projects = scanProjects();
+    if (!projects.length) return;
+
+    if (!hasSeededSeen) {
+      projects.forEach((p) => seenProjectIds.add(p.projectId));
+      saveSeenProjects();
+      hasSeededSeen = true;
+      return;
+    }
+
+    const newProjects = [];
+    for (const project of projects) {
+      if (!seenProjectIds.has(project.projectId)) {
+        seenProjectIds.add(project.projectId);
+        newProjects.push(project);
+      }
+    }
+
+    if (newProjects.length) {
+      saveSeenProjects();
+      notifyNewProjects(newProjects);
+    }
+  }
+
+  async function startMonitoring() {
     if (isMonitoring) return;
     isMonitoring = true;
-
-    const runScan = () => {
-      if (!isMonitoring) return;
-      const projects = scanProjects();
-      if (projects.length) notifyNewProjects(projects);
-    };
+    hasSeededSeen = false;
+    await loadSeenProjects();
 
     runScan();
     observer = new MutationObserver(() => runScan());
     observer.observe(document.body, { childList: true, subtree: true });
 
-    setInterval(runScan, 1500);
+    const pollMs = await new Promise((resolve) => {
+      chrome.storage.local.get(['settings'], (result) => {
+        resolve(result.settings?.pollIntervalMs || 1500);
+      });
+    });
+    if (scanIntervalId) clearInterval(scanIntervalId);
+    scanIntervalId = setInterval(runScan, pollMs);
   }
 
   function stopMonitoring() {
     isMonitoring = false;
+    hasSeededSeen = false;
     if (observer) {
       observer.disconnect();
       observer = null;
+    }
+    if (scanIntervalId) {
+      clearInterval(scanIntervalId);
+      scanIntervalId = null;
     }
   }
 
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg.type === 'START_MONITORING') {
-      startMonitoring();
-      sendResponse({ ok: true });
+      startMonitoring().then(() => sendResponse({ ok: true }));
     } else if (msg.type === 'STOP_MONITORING') {
       stopMonitoring();
       sendResponse({ ok: true });
     } else if (msg.type === 'SCAN_PROJECTS') {
-      sendResponse({ projects: scanProjects() });
+      runScan();
+      sendResponse({ ok: true });
     } else if (msg.type === 'GET_MONITOR_STATUS') {
       sendResponse({ isMonitoring });
+    } else if (msg.type === 'PING') {
+      sendResponse({ ok: true });
     }
     return true;
   });

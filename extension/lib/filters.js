@@ -284,7 +284,18 @@ export function isExcludedCategory(project, settings) {
 
 export function evaluateProjectFilters(project, settings) {
   const minPriceUsd = settings.minPriceUsd ?? 100;
+  const maxBudgetUsd = settings.maxBudget ?? 0;
   const excludedCountries = settings.excludedCountries || DEFAULT_EXCLUDED_COUNTRIES;
+  const allowedTypes = settings.projectTypes || ['fixed', 'hourly'];
+  const bidType = project.bidType || 'fixed';
+
+  if (allowedTypes.length && !allowedTypes.includes(bidType)) {
+    return {
+      pass: false,
+      reason: `excluded_type_${bidType}`,
+      message: `プロジェクト種別が対象外: ${bidType}`
+    };
+  }
 
   const excludedCategory = isExcludedCategory(project, settings);
   if (excludedCategory) {
@@ -295,12 +306,21 @@ export function evaluateProjectFilters(project, settings) {
     };
   }
 
-  if (!meetsMinPrice(project.budget, project.bidType, minPriceUsd)) {
-    const parsed = parseBudgetUsd(project.budget, project.bidType);
+  const parsed = parseBudgetUsd(project.budget, bidType);
+
+  if (!meetsMinPrice(project.budget, bidType, minPriceUsd)) {
     return {
       pass: false,
       reason: `price_below_min_${parsed.minUsd.toFixed(0)}usd`,
       message: `価格が最低$${minPriceUsd}未満 (推定$${parsed.minUsd.toFixed(0)})`
+    };
+  }
+
+  if (maxBudgetUsd > 0 && parsed.maxUsd > maxBudgetUsd) {
+    return {
+      pass: false,
+      reason: `price_above_max_${parsed.maxUsd.toFixed(0)}usd`,
+      message: `価格が上限$${maxBudgetUsd}超過 (推定$${parsed.maxUsd.toFixed(0)})`
     };
   }
 
@@ -314,6 +334,48 @@ export function evaluateProjectFilters(project, settings) {
   }
 
   return { pass: true };
+}
+
+export function getProjectAgeSeconds(project) {
+  if (project.detectedAt) {
+    const elapsed = Math.floor((Date.now() - project.detectedAt) / 1000);
+    if (project.secondsAgo != null && project.secondsAgo >= 0) {
+      return Math.max(elapsed, project.secondsAgo);
+    }
+    return elapsed;
+  }
+  if (project.secondsAgo != null && project.secondsAgo >= 0) {
+    return project.secondsAgo;
+  }
+  return null;
+}
+
+export function evaluateAgeWindow(project, settings) {
+  const minAge = settings.bidWindowMinSec ?? 3;
+  const maxAge = settings.bidWindowMaxSec ?? 10;
+  const ageSec = getProjectAgeSeconds(project);
+
+  if (ageSec == null) {
+    return { pass: false, reason: 'age_unknown', message: '投稿時刻を判定できません', defer: false };
+  }
+  if (ageSec < minAge) {
+    return {
+      pass: false,
+      reason: `too_young_${ageSec}s`,
+      message: `投稿から${minAge}秒未満 (${ageSec}秒)`,
+      defer: true,
+      retryInMs: Math.max(200, (minAge - ageSec) * 1000 + 300)
+    };
+  }
+  if (ageSec > maxAge) {
+    return {
+      pass: false,
+      reason: `too_old_${ageSec}s`,
+      message: `投稿から${maxAge}秒超過 (${ageSec}秒)`,
+      defer: false
+    };
+  }
+  return { pass: true, ageSec };
 }
 
 export function getProposalLanguageInstruction(project) {

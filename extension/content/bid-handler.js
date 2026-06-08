@@ -44,8 +44,11 @@
       if (m) return parseInt(m[1], 10);
     }
     const bidEl = document.querySelector('[class*="bid-count"], [class*="BidCount"], [data-bid-count]');
-    if (bidEl) return parseInt(bidEl.textContent, 10) || 999;
-    return 0;
+    if (bidEl) {
+      const count = parseInt(bidEl.textContent, 10);
+      return Number.isFinite(count) ? count : null;
+    }
+    return null;
   }
 
   function extractClientCountry() {
@@ -127,17 +130,20 @@
   async function fillBidForm(bidData, settings) {
     const form = findBidForm();
     const isHourly = bidData.bidType === 'hourly';
+    const missing = [];
 
     if (isHourly) {
       const rateInput =
         findInputByContext(['hourly', 'rate', 'per hour', 'amount']) ||
         form.querySelector('input[type="number"], input[inputmode="decimal"]');
-      setInputValue(rateInput, bidData.hourlyRate || settings.defaultHourlyRate);
+      if (!rateInput) missing.push('hourly rate');
+      else setInputValue(rateInput, bidData.hourlyRate || settings.defaultHourlyRate);
     } else {
       const amountInput =
         findInputByContext(['bid amount', 'amount', 'price', 'your bid']) ||
         form.querySelector('input[type="number"], input[inputmode="decimal"]');
-      setInputValue(amountInput, bidData.bidAmount || settings.defaultBidAmount);
+      if (!amountInput) missing.push('bid amount');
+      else setInputValue(amountInput, bidData.bidAmount || settings.defaultBidAmount);
 
       const deliveryInput = findInputByContext(['delivery', 'days', 'time', 'period']);
       if (deliveryInput) {
@@ -159,13 +165,15 @@
     const proposalInput =
       findInputByContext(['proposal', 'describe', 'best candidate', 'makes you', 'bid text']) ||
       form.querySelector('textarea');
-    if (proposalInput && bidData.proposal) {
-      const proposal = String(bidData.proposal).slice(0, 1500);
-      setInputValue(proposalInput, proposal);
+    if (!proposalInput || !bidData.proposal) missing.push('proposal');
+    else setInputValue(proposalInput, String(bidData.proposal).slice(0, 1500));
+
+    if (missing.length) {
+      return { ok: false, error: `フォーム入力失敗: ${missing.join(', ')} が見つかりません` };
     }
 
     await sleep(300);
-    return true;
+    return { ok: true };
   }
 
   function findPlaceBidButton() {
@@ -186,7 +194,7 @@
   async function executeBid(bidData, settings) {
     const projectData = getProjectData();
 
-    if (projectData.bidCount >= (settings.maxBidCount || 50)) {
+    if (projectData.bidCount != null && projectData.bidCount >= (settings.maxBidCount || 50)) {
       return {
         success: false,
         skipped: true,
@@ -194,8 +202,8 @@
       };
     }
 
-    const filled = await fillBidForm({ ...bidData, ...projectData }, settings);
-    if (!filled) return { success: false, error: 'フォーム入力失敗' };
+    const fillResult = await fillBidForm({ ...bidData, ...projectData }, settings);
+    if (!fillResult.ok) return { success: false, error: fillResult.error };
 
     const clickResult = await clickPlaceBid();
     if (!clickResult.success) return clickResult;
@@ -207,19 +215,28 @@
       }
     }
 
-    await sleep(1000);
+    await sleep(1500);
 
     if (window.__fabDocumentSigner?.isDocumentSigningPage?.()) {
       return { success: false, needsDocumentSign: true, error: '書類署名が必要' };
     }
 
-    const successIndicators = /bid placed|successfully|your bid has been/i.test(document.body.innerText);
-    const errorIndicators = document.querySelector('[class*="error"], [class*="Error"], .alert-danger');
+    const bodyText = document.body.innerText;
+    const successIndicators = /bid placed|successfully placed|your bid has been submitted|bid submitted|入札が完了/i.test(bodyText);
+    const errorEl = document.querySelector(
+      '[class*="error"], [class*="Error"], .alert-danger, [role="alert"], fl-alert'
+    );
+    const errorText = errorEl?.textContent?.trim() || '';
+    const hasError = errorText && /error|invalid|required|failed|unable|cannot/i.test(errorText);
+    const placeBidStillVisible = !!findPlaceBidButton();
+
+    const success = successIndicators || (!hasError && !placeBidStillVisible);
 
     return {
-      success: successIndicators || !errorIndicators,
+      success,
       projectData,
-      message: successIndicators ? '入札完了' : '入札処理完了（確認推奨）'
+      message: success ? '入札完了' : hasError ? errorText : '入札結果を確認できませんでした',
+      error: success ? undefined : hasError ? errorText : '入札結果を確認できませんでした'
     };
   }
 
@@ -234,6 +251,10 @@
     }
     if (msg.type === 'GET_BID_COUNT') {
       sendResponse({ bidCount: getBidCount() });
+      return true;
+    }
+    if (msg.type === 'PING') {
+      sendResponse({ ok: true });
       return true;
     }
   });

@@ -10,17 +10,21 @@ import {
   recordBidAttempt,
   markProjectProcessed,
   getProcessedProjects,
+  isProjectInFlight,
+  clearStaleQueuedProjects,
   addBidLog
 } from '../lib/storage.js';
 import { generateProposal, analyzeProblem } from '../lib/api-clients.js';
 import { solveProblem } from '../lib/problem-solver.js';
-import { evaluateProjectFilters, detectProjectLanguage } from '../lib/filters.js';
+import { evaluateProjectFilters, evaluateAgeWindow, detectProjectLanguage } from '../lib/filters.js';
 import { finalizeProposal } from '../lib/portfolio.js';
 
 const PROJECTS_URL = 'https://www.freelancer.com/search/projects';
 let monitorTabId = null;
 const bidQueue = [];
 let isProcessingBid = false;
+const pendingYoungProjects = new Map();
+let pendingRetryTimer = null;
 
 async function ensureMonitorTab() {
   const tabs = await chrome.tabs.query({ url: 'https://www.freelancer.com/search/projects*' });
@@ -75,17 +79,39 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+async function waitForContentScript(tabId, timeout = 12000) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    const res = await chrome.tabs.sendMessage(tabId, { type: 'PING' }).catch(() => null);
+    if (res?.ok) return true;
+    await sleep(400);
+  }
+  return false;
+}
+
 async function filterProject(project, settings) {
   const processed = await getProcessedProjects();
-  if (processed[project.projectId]) return { pass: false, reason: 'already_processed' };
+  const existing = processed[project.projectId];
+  if (existing && !['queued', 'bidding'].includes(existing.status)) {
+    return { pass: false, reason: 'already_processed' };
+  }
+  if (await isProjectInFlight(project.projectId)) {
+    return { pass: false, reason: 'already_queued' };
+  }
 
-  if (project.bidCount >= settings.maxBidCount) {
+  if (project.bidCount != null && project.bidCount >= settings.maxBidCount) {
     return { pass: false, reason: `bid_count_${project.bidCount}` };
   }
 
-  const maxAge = settings.bidWindowMaxSec || 10;
-  if (project.secondsAgo > maxAge && project.secondsAgo !== Infinity) {
-    return { pass: false, reason: `too_old_${project.secondsAgo}s` };
+  const ageResult = evaluateAgeWindow(project, settings);
+  if (!ageResult.pass) {
+    return {
+      pass: false,
+      reason: ageResult.reason,
+      message: ageResult.message,
+      defer: ageResult.defer,
+      retryInMs: ageResult.retryInMs
+    };
   }
 
   if (settings.skipNdaProjects && project.isNda) {
@@ -105,6 +131,106 @@ async function filterProject(project, settings) {
   return { pass: true };
 }
 
+function scheduleYoungProjectRetry(project, settings, retryInMs) {
+  const retryAt = Date.now() + retryInMs;
+  pendingYoungProjects.set(project.projectId, { project, settings, retryAt });
+  schedulePendingRetries();
+}
+
+function schedulePendingRetries() {
+  if (pendingRetryTimer || pendingYoungProjects.size === 0) return;
+
+  const nextRetryAt = Math.min(...Array.from(pendingYoungProjects.values()).map((v) => v.retryAt));
+  const delay = Math.max(200, nextRetryAt - Date.now());
+
+  pendingRetryTimer = setTimeout(async () => {
+    pendingRetryTimer = null;
+    const now = Date.now();
+    const ready = [];
+
+    for (const [projectId, item] of pendingYoungProjects) {
+      if (now >= item.retryAt) {
+        pendingYoungProjects.delete(projectId);
+        ready.push(item);
+      }
+    }
+
+    for (const item of ready) {
+      const { pass, reason, message, defer, retryInMs } = await filterProject(item.project, item.settings);
+      if (pass) {
+        await enqueueProject(item.project, item.settings);
+      } else if (defer && retryInMs) {
+        scheduleYoungProjectRetry(item.project, item.settings, retryInMs);
+      } else if (reason !== 'already_processed' && reason !== 'already_queued') {
+        await markProjectProcessed(item.project.projectId, reason);
+        if (
+          reason?.startsWith('price_below') ||
+          reason?.startsWith('price_above') ||
+          reason?.startsWith('excluded_country') ||
+          reason?.startsWith('excluded_category') ||
+          reason?.startsWith('excluded_type')
+        ) {
+          await addBidLog({
+            level: 'warn',
+            message: `スキップ: ${item.project.title} - ${message || reason}`,
+            projectId: item.project.projectId
+          });
+        }
+      }
+    }
+
+    await processBidQueue();
+    schedulePendingRetries();
+  }, delay);
+}
+
+async function enqueueProject(project, settings) {
+  if (await isProjectInFlight(project.projectId)) return false;
+
+  await markProjectProcessed(project.projectId, 'queued');
+  bidQueue.push({ project, settings });
+  await addBidLog({
+    level: 'info',
+    message: `新規プロジェクト検出: ${project.title} (${project.bidCount ?? '?'} bids)`,
+    projectId: project.projectId
+  });
+  return true;
+}
+
+async function handleDetectedProjects(projects) {
+  const settings = await getSettings();
+  if (!settings.isRunning) return { ok: false, reason: 'not_running' };
+
+  await clearStaleQueuedProjects();
+
+  for (const project of projects) {
+    const { pass, reason, message, defer, retryInMs } = await filterProject(project, settings);
+    if (pass) {
+      await enqueueProject(project, settings);
+    } else if (defer && retryInMs) {
+      scheduleYoungProjectRetry(project, settings, retryInMs);
+    } else if (reason !== 'already_processed' && reason !== 'already_queued') {
+      await markProjectProcessed(project.projectId, reason);
+      if (
+        reason?.startsWith('price_below') ||
+        reason?.startsWith('price_above') ||
+        reason?.startsWith('excluded_country') ||
+        reason?.startsWith('excluded_category') ||
+        reason?.startsWith('excluded_type')
+      ) {
+        await addBidLog({
+          level: 'warn',
+          message: `スキップ: ${project.title} - ${message || reason}`,
+          projectId: project.projectId
+        });
+      }
+    }
+  }
+
+  await processBidQueue();
+  return { ok: true, queued: bidQueue.length };
+}
+
 async function processBidQueue() {
   if (isProcessingBid || bidQueue.length === 0) return;
   isProcessingBid = true;
@@ -122,12 +248,39 @@ async function executeBidFlow(project, settings) {
   let tab = null;
 
   try {
+    const ageCheck = evaluateAgeWindow(project, settings);
+    if (!ageCheck.pass) {
+      await markProjectProcessed(project.projectId, ageCheck.reason);
+      await recordBidAttempt({
+        success: false,
+        skipped: true,
+        projectId: project.projectId,
+        title: project.title,
+        message: ageCheck.message || ageCheck.reason,
+        level: 'warn'
+      });
+      return;
+    }
+
+    await markProjectProcessed(project.projectId, 'bidding');
     tab = await chrome.tabs.create({ url: project.url, active: false });
     await waitForTabLoad(tab.id);
-    await sleep(500);
+
+    const scriptReady = await waitForContentScript(tab.id);
+    if (!scriptReady) {
+      await recordBidAttempt({
+        success: false,
+        projectId: project.projectId,
+        title: project.title,
+        message: 'content script通信失敗（タイムアウト）',
+        level: 'error'
+      });
+      await markProjectProcessed(project.projectId, 'failed');
+      return;
+    }
 
     const bidCountRes = await chrome.tabs.sendMessage(tab.id, { type: 'GET_BID_COUNT' }).catch(() => null);
-    if (bidCountRes && bidCountRes.bidCount >= settings.maxBidCount) {
+    if (bidCountRes?.bidCount != null && bidCountRes.bidCount >= settings.maxBidCount) {
       await markProjectProcessed(project.projectId, 'skipped_bid_count');
       await recordBidAttempt({
         success: false,
@@ -183,7 +336,11 @@ async function executeBidFlow(project, settings) {
     }).catch(() => ({ success: false, error: 'content script通信失敗' }));
 
     if (!result?.success && (result?.needsDocumentSign || result?.error?.includes('署名'))) {
-      result = await handleDocumentSigning(tab.id, settings, result);
+      if (settings.autoSignDocuments !== false) {
+        result = await handleDocumentSigning(tab.id, settings, result, bidData);
+      } else {
+        result = { success: false, skipped: true, error: '書類署名が必要（自動署名オフ）' };
+      }
     }
 
     if (!result?.success) {
@@ -236,15 +393,23 @@ async function executeBidFlow(project, settings) {
   }
 }
 
-async function handleDocumentSigning(tabId, settings, prevResult) {
+async function handleDocumentSigning(tabId, settings, prevResult, bidData) {
   const signResult = await chrome.tabs.sendMessage(tabId, {
     type: 'SIGN_DOCUMENT',
     settings
   }).catch(() => ({ success: false }));
 
   if (signResult?.success) {
-    await sleep(1000);
-    return { success: true, message: '書類署名後入札完了' };
+    await sleep(1500);
+    const retryBid = await chrome.tabs.sendMessage(tabId, {
+      type: 'EXECUTE_BID',
+      bidData,
+      settings
+    }).catch(() => ({ success: false, error: '署名後の入札再試行失敗' }));
+    if (retryBid?.success) {
+      return { success: true, message: '書類署名後入札完了' };
+    }
+    return retryBid;
   }
 
   const solveResult = await attemptProblemSolve(
@@ -255,7 +420,14 @@ async function handleDocumentSigning(tabId, settings, prevResult) {
   );
   if (solveResult?.resolved) {
     const retry = await chrome.tabs.sendMessage(tabId, { type: 'SIGN_DOCUMENT', settings });
-    return retry?.success ? { success: true } : prevResult;
+    if (retry?.success) {
+      await sleep(1500);
+      return chrome.tabs.sendMessage(tabId, {
+        type: 'EXECUTE_BID',
+        bidData,
+        settings
+      }).catch(() => prevResult);
+    }
   }
   return prevResult;
 }
@@ -336,37 +508,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         sendResponse({ ok: true });
         break;
       case 'NEW_PROJECTS_DETECTED': {
-        const settings = await getSettings();
-        if (!settings.isRunning) {
-          sendResponse({ ok: false, reason: 'not_running' });
-          break;
-        }
-        for (const project of msg.projects) {
-          const { pass, reason, message } = await filterProject(project, settings);
-          if (pass) {
-            bidQueue.push({ project, settings });
-            await addBidLog({
-              level: 'info',
-              message: `新規プロジェクト検出: ${project.title} (${project.bidCount} bids)`,
-              projectId: project.projectId
-            });
-          } else if (reason !== 'already_processed') {
-            await markProjectProcessed(project.projectId, reason);
-            if (
-              reason?.startsWith('price_below') ||
-              reason?.startsWith('excluded_country') ||
-              reason?.startsWith('excluded_category')
-            ) {
-              await addBidLog({
-                level: 'warn',
-                message: `スキップ: ${project.title} - ${message || reason}`,
-                projectId: project.projectId
-              });
-            }
-          }
-        }
-        processBidQueue();
-        sendResponse({ ok: true, queued: bidQueue.length });
+        sendResponse(await handleDetectedProjects(msg.projects || []));
         break;
       }
       case 'CONTENT_SCRIPT_READY':
@@ -390,7 +532,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     const settings = await getSettings();
     if (!settings.isRunning) return;
     const tabId = await ensureMonitorTab();
-    chrome.tabs.sendMessage(tabId, { type: 'SCAN_PROJECTS' }).catch(() => {});
+    await chrome.tabs.sendMessage(tabId, { type: 'SCAN_PROJECTS' }).catch(() => {});
   }
 });
 

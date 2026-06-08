@@ -158,3 +158,31 @@ export async function markProjectProcessed(projectId, status) {
   }
   await chrome.storage.local.set({ processedProjects: processed });
 }
+
+export async function isProjectInFlight(projectId) {
+  const processed = await getProcessedProjects();
+  const entry = processed[projectId];
+  if (!entry) return false;
+  const inFlight = ['queued', 'bidding'].includes(entry.status);
+  if (!inFlight) return false;
+  const staleMs = 5 * 60 * 1000;
+  if (Date.now() - entry.at > staleMs) {
+    return false;
+  }
+  return true;
+}
+
+export async function clearStaleQueuedProjects() {
+  const processed = await getProcessedProjects();
+  const staleMs = 5 * 60 * 1000;
+  let changed = false;
+  for (const [id, entry] of Object.entries(processed)) {
+    if (['queued', 'bidding'].includes(entry.status) && Date.now() - entry.at > staleMs) {
+      delete processed[id];
+      changed = true;
+    }
+  }
+  if (changed) {
+    await chrome.storage.local.set({ processedProjects: processed });
+  }
+}
