@@ -448,6 +448,9 @@ async function runBrowserBid(project, projectData, bidData, settings, bidPageUrl
   let result = null;
   const maxBidAttempts = slowMode ? 3 : 2;
   for (let attempt = 1; attempt <= maxBidAttempts; attempt++) {
+    await chrome.tabs.update(tabId, { active: true }).catch(() => {});
+    await sleep(1200);
+
     result = await chrome.tabs
       .sendMessage(tabId, { type: 'EXECUTE_BID', bidData, settings })
       .catch(() => ({ success: false, error: 'content script通信失敗' }));

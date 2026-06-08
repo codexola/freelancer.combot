@@ -10,31 +10,128 @@
     return new Promise((r) => setTimeout(r, ms));
   }
 
+  function queryDeep(selector, root = document) {
+    const out = [];
+    const seen = new Set();
+    const walk = (node) => {
+      if (!node || seen.has(node)) return;
+      try {
+        if (node.querySelectorAll) {
+          for (const el of node.querySelectorAll(selector)) {
+            if (!seen.has(el)) {
+              seen.add(el);
+              out.push(el);
+            }
+          }
+          for (const child of node.querySelectorAll('*')) {
+            if (child.shadowRoot) walk(child.shadowRoot);
+          }
+        }
+      } catch {
+        /* ignore */
+      }
+    };
+    walk(root);
+    return out;
+  }
+
+  function resolveFocusableInput(el) {
+    if (!el) return null;
+    const tag = el.tagName;
+    if (tag === 'TEXTAREA' || tag === 'INPUT' || tag === 'SELECT') return el;
+    if (el.isContentEditable) return el;
+
+    const inner = el.querySelector?.('textarea, input, select, [contenteditable="true"]');
+    if (inner) return resolveFocusableInput(inner);
+
+    if (el.shadowRoot) {
+      const shadowInner = el.shadowRoot.querySelector(
+        'textarea, input, select, [contenteditable="true"]'
+      );
+      if (shadowInner) return shadowInner;
+    }
+    return el;
+  }
+
   function setInputValue(el, value) {
-    if (!el) return false;
-    el.focus();
-    const nativeSetter = Object.getOwnPropertyDescriptor(
-      el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype,
-      'value'
-    )?.set;
-    if (nativeSetter) nativeSetter.call(el, String(value));
-    else el.value = String(value);
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
+    const target = resolveFocusableInput(el);
+    if (!target) return false;
+    const text = String(value);
+
+    target.focus?.();
+    if (target.isContentEditable) {
+      target.textContent = text;
+      target.dispatchEvent(new Event('input', { bubbles: true }));
+      target.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    }
+
+    const proto =
+      target.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    const nativeSetter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+    if (nativeSetter) nativeSetter.call(target, text);
+    else target.value = text;
+
+    target.dispatchEvent(new Event('input', { bubbles: true }));
+    target.dispatchEvent(new Event('change', { bubbles: true }));
+    target.dispatchEvent(new Event('blur', { bubbles: true }));
     return true;
   }
 
+  function readInputValue(el) {
+    const target = resolveFocusableInput(el);
+    if (!target) return '';
+    if (target.isContentEditable) return (target.textContent || '').trim();
+    return (target.value || '').trim();
+  }
+
   function getElementLabel(el) {
-    return [
+    const parts = [
       el.textContent,
       el.value,
       el.getAttribute('aria-label'),
-      el.getAttribute('title')
-    ]
+      el.getAttribute('title'),
+      el.getAttribute('data-label')
+    ];
+    if (el.shadowRoot) {
+      const inner = el.shadowRoot.querySelector('button, span, slot, a');
+      if (inner) {
+        parts.push(inner.textContent, inner.getAttribute?.('aria-label'));
+      }
+    }
+    return parts
       .filter(Boolean)
       .join(' ')
       .replace(/\s+/g, ' ')
       .trim();
+  }
+
+  function isElementDisabled(el) {
+    if (!el) return true;
+    const nodes = [el, el.querySelector?.('button'), el.shadowRoot?.querySelector('button')].filter(
+      Boolean
+    );
+    return nodes.some(
+      (node) =>
+        node.disabled ||
+        node.getAttribute?.('aria-disabled') === 'true' ||
+        node.classList?.contains('disabled')
+    );
+  }
+
+  function dispatchMouseClick(target, clientX, clientY) {
+    const opts = {
+      bubbles: true,
+      cancelable: true,
+      view: window,
+      clientX,
+      clientY,
+      button: 0
+    };
+    for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+      target.dispatchEvent(new MouseEvent(type, opts));
+    }
+    if (typeof target.click === 'function') target.click();
   }
 
   function isVisible(el) {
@@ -53,12 +150,23 @@
       targets.push(node);
     };
 
+    const host = el.closest?.('fl-button') || (el.tagName === 'FL-BUTTON' ? el : null) || el;
+    add(host);
     add(el);
-    add(el.closest?.('fl-button'));
-    add(el.querySelector?.('button, a, [role="button"]'));
-    if (el.shadowRoot) add(el.shadowRoot.querySelector('button, a, [role="button"]'));
-    const flParent = el.closest?.('fl-button');
-    if (flParent?.shadowRoot) add(flParent.shadowRoot.querySelector('button, a, [role="button"]'));
+
+    const walk = (node) => {
+      if (!node) return;
+      add(node);
+      if (node.shadowRoot) {
+        for (const child of node.shadowRoot.querySelectorAll('button, a, [role="button"], span')) {
+          add(child);
+        }
+      }
+      for (const child of node.querySelectorAll?.('button, a, [role="button"]') || []) {
+        add(child);
+      }
+    };
+    walk(host);
 
     return targets;
   }
@@ -66,35 +174,52 @@
   function clickElement(el) {
     if (!el) return false;
     try {
-      el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
+      el.scrollIntoView({ block: 'end', inline: 'nearest', behavior: 'instant' });
     } catch {
       /* ignore */
     }
 
-    const targets = getClickTargets(el);
+    const rect = el.getBoundingClientRect();
+    const x = rect.left + Math.max(rect.width / 2, 8);
+    const y = rect.top + Math.max(rect.height / 2, 8);
+    const atPoint = document.elementFromPoint(x, y);
+
+    const targets = getClickTargets(atPoint || el);
     let clicked = false;
     for (const target of targets) {
-      if (target.disabled || target.getAttribute?.('aria-disabled') === 'true') continue;
-      for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
-        target.dispatchEvent(
-          new MouseEvent(type, { bubbles: true, cancelable: true, view: window })
-        );
-      }
-      if (typeof target.click === 'function') target.click();
+      if (isElementDisabled(target)) continue;
+      dispatchMouseClick(target, x, y);
+      clicked = true;
+    }
+
+    if (!clicked && atPoint) {
+      dispatchMouseClick(atPoint, x, y);
       clicked = true;
     }
     return clicked;
   }
 
-  async function scrollToBidSection() {
-    const targets = [findPlaceBidButton(), findOpenBidButton(), findProposalInput(), findBidForm()].filter(
-      Boolean
-    );
-    const target = targets[0];
-    if (target?.scrollIntoView) {
-      target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  async function scrollToPlaceBidButton() {
+    const btn = findPlaceBidButton();
+    if (btn) {
+      btn.scrollIntoView({ block: 'end', inline: 'nearest', behavior: 'instant' });
+      await sleep(400);
+      window.scrollBy(0, 160);
     } else {
-      window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+      window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' });
+    }
+    await sleep(800);
+  }
+
+  async function scrollToBidSection() {
+    const openBtn = findOpenBidButton();
+    const proposal = findProposalInput();
+    const placeBid = findPlaceBidButton();
+    const target = openBtn || proposal || placeBid || findBidForm();
+    if (target?.scrollIntoView) {
+      target.scrollIntoView({ block: 'center', behavior: 'instant' });
+    } else {
+      window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' });
     }
     await sleep(700);
   }
@@ -125,6 +250,43 @@
   }
 
   function findProposalInput() {
+    const form = findBidForm();
+    const labelNodes = queryDeep('label, fl-label, h3, h4, span, div', form);
+    const proposalLabel = labelNodes.find((node) =>
+      /describe your proposal|what makes you the best|minimum 100 characters/i.test(
+        node.textContent || ''
+      )
+    );
+    if (proposalLabel) {
+      const container =
+        proposalLabel.closest(
+          'fl-textarea, fl-text-field, [class*="proposal"], [class*="Proposal"], [class*="field"], section, div'
+        ) || proposalLabel.parentElement;
+      const near = container?.querySelector?.('textarea, [contenteditable="true"], fl-textarea');
+      if (near) {
+        const resolved = resolveFocusableInput(near);
+        if (resolved && isVisible(resolved)) return resolved;
+      }
+    }
+
+    const deepFields = queryDeep('textarea, fl-textarea, [contenteditable="true"]', form);
+    for (const field of deepFields) {
+      const resolved = resolveFocusableInput(field);
+      if (!resolved || !isVisible(resolved)) continue;
+      const ctx = [
+        resolved.placeholder,
+        resolved.getAttribute('aria-label'),
+        field.getAttribute?.('aria-label'),
+        field.closest?.('[class*="field"], [class*="Field"]')?.textContent
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      if (/proposal|candidate|best candidate|describe your|makes you|write my bid/.test(ctx)) {
+        return resolved;
+      }
+    }
+
     const textareas = Array.from(document.querySelectorAll('textarea')).filter(isVisible);
     for (const ta of textareas) {
       const ctx = [
@@ -142,8 +304,9 @@
         return ta;
       }
     }
-    const form = findBidForm();
-    const inForm = Array.from(form.querySelectorAll('textarea')).filter(isVisible);
+    const inForm = Array.from(form.querySelectorAll('textarea, [contenteditable="true"]')).filter(
+      isVisible
+    );
     if (inForm.length === 1) return inForm[0];
     if (inForm.length > 1) {
       inForm.sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top);
@@ -370,12 +533,14 @@
   }
 
   function findInputByContext(keywords, root) {
-    const inputs = (root || document).querySelectorAll('input, textarea, select');
+    const inputs = queryDeep('input, textarea, select, fl-input, fl-text-field', root || document);
     for (const input of inputs) {
+      const resolved = resolveFocusableInput(input) || input;
       const context = [
-        input.placeholder,
-        input.name,
-        input.id,
+        resolved.placeholder,
+        resolved.name,
+        resolved.id,
+        resolved.getAttribute('aria-label'),
         input.getAttribute('aria-label'),
         input.closest('label')?.textContent,
         input.closest('[class*="field"], [class*="Field"], .form-group')?.textContent
@@ -383,9 +548,19 @@
         .filter(Boolean)
         .join(' ')
         .toLowerCase();
-      if (keywords.some((k) => context.includes(k))) return input;
+      if (keywords.some((k) => context.includes(k))) return resolved;
     }
     return null;
+  }
+
+  async function commitFormValues(form) {
+    const fields = queryDeep('input, textarea, select, [contenteditable="true"]', form);
+    for (const field of fields) {
+      const target = resolveFocusableInput(field) || field;
+      target.dispatchEvent?.(new Event('blur', { bubbles: true }));
+    }
+    document.activeElement?.blur?.();
+    await sleep(600);
   }
 
   async function fillBidForm(bidData, settings) {
@@ -420,15 +595,33 @@
     await selectProfile(settings, form);
     fillYourNameFields(settings, form);
 
+    const proposalText = String(bidData.proposal || '').trim();
+    if (!proposalText) missing.push('proposal');
+    else if (proposalText.length < 100) {
+      return { ok: false, error: `提案文が短すぎます (${proposalText.length}/100文字)` };
+    }
+
     const proposalInput = findProposalInput();
-    if (!proposalInput || !bidData.proposal) missing.push('proposal');
-    else setInputValue(proposalInput, String(bidData.proposal).slice(0, 1500));
+    if (!proposalInput) missing.push('proposal');
+    else {
+      setInputValue(proposalInput, proposalText.slice(0, 1500));
+      await sleep(500);
+      const written = readInputValue(proposalInput);
+      if (written.length < 80) {
+        setInputValue(proposalInput, proposalText.slice(0, 1500));
+        await sleep(500);
+      }
+      if (readInputValue(proposalInput).length < 80) {
+        return { ok: false, error: '提案文をフォームに入力できませんでした' };
+      }
+    }
 
     if (missing.length) {
       return { ok: false, error: `フォーム入力失敗: ${missing.join(', ')} が見つかりません` };
     }
 
-    await sleep(400);
+    await commitFormValues(form);
+    await scrollToPlaceBidButton();
     return { ok: true };
   }
 
@@ -441,17 +634,39 @@
   }
 
   function findPlaceBidButton() {
-    const buttons = document.querySelectorAll(
-      'fl-button, button, [role="button"], a, input[type="submit"], [class*="Button"], [class*="btn"], [class*="primary"]'
-    );
-    const matches = Array.from(buttons).filter((b) => isPlaceBidLabel(getElementLabel(b)));
-    if (!matches.length) return null;
-    matches.sort((a, b) => {
-      const ay = a.getBoundingClientRect?.().top || 0;
-      const by = b.getBoundingClientRect?.().top || 0;
-      return by - ay;
-    });
-    return matches.find(isVisible) || matches[0];
+    const form = findBidForm();
+    const scopes = [form, document.body];
+    const candidates = [];
+
+    for (const scope of scopes) {
+      const buttons = queryDeep('fl-button, button, [role="button"], a, input[type="submit"]', scope);
+      for (const b of buttons) {
+        const label = getElementLabel(b);
+        if (!isPlaceBidLabel(label)) continue;
+        const rect = b.getBoundingClientRect?.();
+        if (!rect || rect.width < 40 || rect.height < 20) continue;
+        candidates.push({ el: b, top: rect.top, area: rect.width * rect.height });
+      }
+    }
+
+    if (!candidates.length) return null;
+    candidates.sort((a, b) => b.top - a.top || b.area - a.area);
+    return candidates.find((c) => isVisible(c.el))?.el || candidates[0].el;
+  }
+
+  async function waitForPlaceBidButton(settings) {
+    const slow = settings?.slowNetworkMode !== false;
+    const timeout = slow ? 20000 : 12000;
+    const start = Date.now();
+
+    while (Date.now() - start < timeout) {
+      await scrollToPlaceBidButton();
+      const btn = findPlaceBidButton();
+      if (btn && !isElementDisabled(btn)) return btn;
+      await sleep(700);
+    }
+
+    return findPlaceBidButton();
   }
 
   function detectBidSuccess() {
@@ -489,18 +704,23 @@
 
   async function clickPlaceBidOnce(settings) {
     const slow = settings?.slowNetworkMode !== false;
-    const clickDelay = slow ? 3500 : 2500;
+    const clickDelay = slow ? 4000 : 3000;
 
-    await scrollToBidSection();
-    let btn = findPlaceBidButton();
-    if (!btn) {
-      await sleep(1500);
-      await scrollToBidSection();
-      btn = findPlaceBidButton();
-    }
+    const btn = await waitForPlaceBidButton(settings);
     if (!btn) return { success: false, error: 'Place Bidボタンが見つかりません' };
+    if (isElementDisabled(btn)) {
+      return { success: false, error: 'Place Bidボタンが無効です（提案文や金額を確認してください）' };
+    }
 
-    clickElement(btn);
+    await scrollToPlaceBidButton();
+    const host = btn.closest?.('fl-button') || btn;
+    clickElement(host);
+
+    await sleep(400);
+    if (!isElementDisabled(btn)) {
+      clickElement(host);
+    }
+
     await sleep(clickDelay);
     return { success: true };
   }
