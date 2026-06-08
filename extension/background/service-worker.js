@@ -352,7 +352,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             });
           } else if (reason !== 'already_processed') {
             await markProjectProcessed(project.projectId, reason);
-            if (reason?.startsWith('price_below') || reason?.startsWith('excluded_country')) {
+            if (
+              reason?.startsWith('price_below') ||
+              reason?.startsWith('excluded_country') ||
+              reason?.startsWith('excluded_category')
+            ) {
               await addBidLog({
                 level: 'warn',
                 message: `スキップ: ${project.title} - ${message || reason}`,

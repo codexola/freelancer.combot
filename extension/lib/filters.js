@@ -2,7 +2,47 @@
  * プロジェクトフィルタリング
  * - 最低価格 $100 USD
  * - インド・パキスタン・アフリカ諸国を除外
+ * - マーケティング・成人コンテンツ・仮想秘書案件を除外
  */
+
+export const EXCLUDED_CATEGORY_RULES = [
+  {
+    id: 'marketing',
+    label: 'マーケティング',
+    keywords: [
+      'marketing', 'digital marketing', 'social media marketing', 'email marketing',
+      'content marketing', 'influencer marketing', 'affiliate marketing',
+      'facebook ads', 'google ads', 'instagram ads', 'tiktok ads', 'ppc',
+      'lead generation', 'brand awareness', 'marketing campaign', 'marketing strategy',
+      'social media management', 'smm', 'seo marketing', 'promotion campaign',
+      'market research', 'growth hacking', 'media buying', 'ad campaign',
+      'マーケティング', '広告運用', '集客'
+    ]
+  },
+  {
+    id: 'adult',
+    label: '成人コンテンツ',
+    keywords: [
+      'adult content', 'adult website', 'adult site', 'adult video', 'adult entertainment',
+      'porn', 'pornography', 'pornographic', 'xxx', 'nsfw', 'erotic', 'erotica',
+      'escort', 'onlyfans', 'webcam model', 'cam girl', 'cam site', 'nude', 'nudity',
+      'sex site', 'sex chat', 'adult chat', '18+', 'mature content', 'x-rated',
+      '成人', 'アダルト', 'エロ', '風俗'
+    ]
+  },
+  {
+    id: 'virtual_assistant',
+    label: '仮想秘書',
+    keywords: [
+      'virtual assistant', 'virtual secretary', 'hire a va', 'hiring a va',
+      'need a va', 'looking for va', 'personal assistant', 'executive assistant',
+      'administrative assistant', 'online assistant', 'remote assistant',
+      'office assistant', 'secretary needed', 'hire assistant', 'hiring assistant',
+      'virtual admin', 'va support', 'data entry assistant', 'customer support assistant',
+      '仮想秘書', 'バーチャルアシスタント', 'オンライン秘書', 'リモート秘書'
+    ]
+  }
+];
 
 export const DEFAULT_EXCLUDED_COUNTRIES = [
   'india',
@@ -199,9 +239,61 @@ function detectPortuguese(text) {
   return /\b(olá|preciso|projeto|desenvolvimento|site|aplicação|obrigado|orçamento)\b/i.test(text);
 }
 
+export function getProjectSearchText(project) {
+  return [
+    project.title,
+    project.description,
+    (project.skills || []).join(' '),
+    (project.categories || []).join(' ')
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+}
+
+export function detectExcludedCategory(project, rules = EXCLUDED_CATEGORY_RULES) {
+  const text = getProjectSearchText(project);
+
+  for (const rule of rules) {
+    for (const keyword of rule.keywords) {
+      const normalized = keyword.toLowerCase().trim();
+      if (!normalized) continue;
+
+      if (normalized.includes(' ')) {
+        if (text.includes(normalized)) return rule;
+        continue;
+      }
+
+      const pattern = new RegExp(`\\b${escapeRegExp(normalized)}\\b`, 'i');
+      if (pattern.test(text)) return rule;
+    }
+  }
+
+  return null;
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+export function isExcludedCategory(project, settings) {
+  if (settings?.skipExcludedCategories === false) return null;
+  const rules = settings?.excludedCategories || EXCLUDED_CATEGORY_RULES;
+  return detectExcludedCategory(project, rules);
+}
+
 export function evaluateProjectFilters(project, settings) {
   const minPriceUsd = settings.minPriceUsd ?? 100;
   const excludedCountries = settings.excludedCountries || DEFAULT_EXCLUDED_COUNTRIES;
+
+  const excludedCategory = isExcludedCategory(project, settings);
+  if (excludedCategory) {
+    return {
+      pass: false,
+      reason: `excluded_category_${excludedCategory.id}`,
+      message: `除外カテゴリ: ${excludedCategory.label}`
+    };
+  }
 
   if (!meetsMinPrice(project.budget, project.bidType, minPriceUsd)) {
     const parsed = parseBudgetUsd(project.budget, project.bidType);

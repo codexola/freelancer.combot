@@ -24,6 +24,7 @@ export const DEFAULT_SETTINGS = {
   proposalStyle: 'professional',
   autoSignDocuments: true,
   skipNdaProjects: false,
+  skipExcludedCategories: true,
   skillsFilter: [],
   minPriceUsd: 100,
   minBudget: 100,

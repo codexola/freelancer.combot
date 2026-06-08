@@ -41,6 +41,9 @@ function renderSettings() {
 
   $('autoSignDocuments').checked = currentSettings.autoSignDocuments !== false;
   $('skipNdaProjects').checked = !!currentSettings.skipNdaProjects;
+  $('skipExcludedCategories').checked = currentSettings.skipExcludedCategories !== false;
+  $('excludedCategoriesInfo').value =
+    'マーケティング, 成人コンテンツ, 仮想秘書 (採用・VA・パーソナルアシスタント)';
   $('typeFixed').checked = (currentSettings.projectTypes || ['fixed', 'hourly']).includes('fixed');
   $('typeHourly').checked = (currentSettings.projectTypes || ['fixed', 'hourly']).includes('hourly');
 
@@ -90,6 +93,7 @@ function collectSettings() {
     fullAddress: $('fullAddress').value,
     autoSignDocuments: $('autoSignDocuments').checked,
     skipNdaProjects: $('skipNdaProjects').checked,
+    skipExcludedCategories: $('skipExcludedCategories').checked,
     minPriceUsd: parseFloat($('minPriceUsd').value) || 100,
     minBudget: parseFloat($('minPriceUsd').value) || 100,
     maxBudget: parseFloat($('maxBudget').value) || 10000,
