@@ -16,6 +16,19 @@ export async function captureScreenshot(tabId) {
 }
 
 export async function executeActions(tabId, actions, settings) {
+  const viaBidHandler = await chrome.tabs
+    .sendMessage(tabId, { type: 'EXECUTE_AI_ACTIONS', actions, settings })
+    .catch(() => null);
+
+  if (viaBidHandler?.results) {
+    return viaBidHandler.results.map((entry) => ({
+      action: entry.action,
+      success: entry.success,
+      error: entry.error,
+      result: entry.result
+    }));
+  }
+
   const results = [];
   for (const action of actions) {
     try {

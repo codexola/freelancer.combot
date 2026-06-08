@@ -209,9 +209,10 @@ function cleanAiOutput(text) {
 const WORKFLOW_REFERENCE = `
 既知のワークフロー:
 1. プロジェクト一覧(f8): 新規プロジェクト検出
-2. 固定価格入札(f7): 金額、納期、プロフィール、提案文、Place Bid
-3. 時給入札(f6): 時給、プロフィール、提案文、Place Bid
+2. 固定価格入札(f7): 金額、納期、プロフィール、提案文、ページ最下部のピンク「Place Bid」
+3. 時給入札(f6): 時給、プロフィール、提案文、ページ最下部のピンク「Place Bid」
 4. IP Agreement(f4-f5): 署名・氏名・住所 → Submit Document
+5. Preferred Freelancer必須の場合は入札不可（タブを閉じる）
 `;
 
 export async function analyzeProblem(settings, screenshotBase64, context) {
@@ -222,14 +223,21 @@ ${WORKFLOW_REFERENCE}
 ## 状況
 ${context}
 
+## ルール
+- 提案文は100文字以上必要。空の場合はfillで入力。
+- Place Bidはページ最下部のピンク/赤ボタン。scrollToPlaceBidを先に使う。
+- selectorが不明な場合はdescriptionに「place bid」「proposal」「hourly rate」等を英語で書く。
+- Preferred Freelancer必須と表示されている場合はcanAutoResolve:false。
+
 ## 出力形式（JSONのみ）
 {
   "problem": "問題の説明",
   "solution": "解決方法",
   "actions": [
-    { "type": "click", "selector": "CSSセレクタ", "description": "説明" },
-    { "type": "fill", "selector": "CSSセレクタ", "value": "入力値", "description": "説明" },
-    { "type": "wait", "ms": 1000, "description": "説明" },
+    { "type": "scrollToPlaceBid", "description": "Place Bidボタンまでスクロール" },
+    { "type": "click", "selector": "CSSセレクタ", "description": "place bid button" },
+    { "type": "fill", "selector": "CSSセレクタ", "value": "入力値", "description": "proposal textarea" },
+    { "type": "wait", "ms": 1500, "description": "説明" },
     { "type": "drawSignature", "description": "署名を描画" }
   ],
   "canAutoResolve": true

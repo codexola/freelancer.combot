@@ -331,6 +331,38 @@
     );
   }
 
+  function isPreferredFreelancerRequired() {
+    const text = (document.body.innerText || '').replace(/\s+/g, ' ');
+    if (
+      /you must be a preferred freelancer/i.test(text) ||
+      /must be a preferred freelancer(?:\s+to|\s+in order)/i.test(text) ||
+      /only (?:for )?preferred freelancers?(?:\s+can|\s+may|\s+are)/i.test(text) ||
+      /preferred freelancer(?:s)?\s+(?:only|required|membership)/i.test(text)
+    ) {
+      return true;
+    }
+
+    const nodes = queryDeep(
+      'fl-alert, fl-banner, [role="alert"], [class*="alert"], [class*="Alert"], [class*="notice"], [class*="restriction"]',
+      document.body
+    );
+    return nodes.some((node) =>
+      /preferred freelancer/i.test(node.textContent || '')
+    );
+  }
+
+  function preferredFreelancerSkipResult(projectData = null) {
+    return {
+      success: false,
+      skipped: true,
+      reason: 'preferred_freelancer_required',
+      error: 'You must be a Preferred Freelancer',
+      message: 'Preferred Freelancer必須のため入札不可',
+      closeTab: true,
+      projectData
+    };
+  }
+
   function findOpenBidButton() {
     const buttons = document.querySelectorAll(
       'button, fl-button, a, [role="button"], [class*="Button"], [class*="btn"]'
@@ -350,6 +382,14 @@
     const start = Date.now();
 
     while (Date.now() - start < timeout) {
+      if (isPreferredFreelancerRequired()) {
+        return {
+          ready: false,
+          preferredFreelancerRequired: true,
+          error: 'Preferred Freelancer必須のため入札不可'
+        };
+      }
+
       await scrollToBidSection();
 
       if (window.__fabDocumentSigner?.isDocumentSigningPage?.()) {
@@ -459,7 +499,8 @@
       bidCount: getBidCount(),
       clientCountry: extractClientCountry(),
       projectLanguage: extractProjectLanguage(),
-      languageText: extractProjectLanguage()
+      languageText: extractProjectLanguage(),
+      preferredFreelancerRequired: isPreferredFreelancerRequired()
     };
   }
 
@@ -677,6 +718,10 @@
   }
 
   function detectBidError() {
+    if (isPreferredFreelancerRequired()) {
+      return 'You must be a Preferred Freelancer';
+    }
+
     const errorEl = document.querySelector(
       '[class*="error"], [class*="Error"], .alert-danger, [role="alert"], fl-alert'
     );
@@ -760,8 +805,15 @@
       await sleep(3000);
     }
 
+    if (isPreferredFreelancerRequired()) {
+      return preferredFreelancerSkipResult(getProjectData());
+    }
+
     const pageReady = await prepareBidPage(settings);
     if (!pageReady.ready) {
+      if (pageReady.preferredFreelancerRequired || isPreferredFreelancerRequired()) {
+        return preferredFreelancerSkipResult(getProjectData());
+      }
       return {
         success: false,
         error: pageReady.error,
@@ -770,6 +822,10 @@
     }
 
     const projectData = getProjectData();
+
+    if (projectData.preferredFreelancerRequired) {
+      return preferredFreelancerSkipResult(projectData);
+    }
 
     if (projectData.bidCount != null && projectData.bidCount >= (settings.maxBidCount || 50)) {
       return {
@@ -816,18 +872,111 @@
       return { success: true, projectData, message: '入札完了' };
     }
 
+    if (isPreferredFreelancerRequired()) {
+      return preferredFreelancerSkipResult(projectData);
+    }
+
     const errorText = detectBidError() || finalConfirm.error;
+    if (/preferred freelancer/i.test(errorText || '')) {
+      return preferredFreelancerSkipResult(projectData);
+    }
+
     return {
       success: false,
       projectData,
       message: errorText || '入札結果を確認できませんでした',
-      error: errorText || '入札結果を確認できませんでした'
+      error: errorText || '入札結果を確認できませんでした',
+      closeTab: true
+    };
+  }
+
+  async function executeAiActions(actions, settings) {
+    const results = [];
+    for (const action of actions || []) {
+      try {
+        if (action.type === 'wait') {
+          await sleep(action.ms || 1000);
+          results.push({ action, success: true });
+          continue;
+        }
+
+        if (action.type === 'scrollToPlaceBid') {
+          await scrollToPlaceBidButton();
+          results.push({ action, success: true });
+          continue;
+        }
+
+        const hint = `${action.description || ''} ${action.selector || ''}`.toLowerCase();
+
+        if (action.type === 'click') {
+          let el = action.selector ? document.querySelector(action.selector) : null;
+          if (!el && /place\s*bid/.test(hint)) el = findPlaceBidButton();
+          if (!el && /submit document|sign/.test(hint)) {
+            el = Array.from(document.querySelectorAll('fl-button, button, [role="button"]')).find((b) =>
+              /submit document|sign/i.test(getElementLabel(b))
+            );
+          }
+          if (!el) {
+            results.push({ action, success: false, error: `要素が見つかりません: ${action.selector || hint}` });
+            continue;
+          }
+          clickElement(el);
+          results.push({ action, success: true });
+          continue;
+        }
+
+        if (action.type === 'fill') {
+          let el = action.selector ? document.querySelector(action.selector) : null;
+          if (!el && /proposal|describe your/.test(hint)) el = findProposalInput();
+          if (!el && /hourly|rate|per hour/.test(hint)) {
+            el = findInputByContext(['hourly', 'rate', 'per hour'], findBidForm());
+          }
+          if (!el && /amount|bid amount|delivery|days/.test(hint)) {
+            el = findInputByContext(['bid amount', 'amount', 'delivery', 'days'], findBidForm());
+          }
+          if (!el && /name/.test(hint)) {
+            fillYourNameFields(settings, document);
+            results.push({ action, success: true, result: 'filled name fields' });
+            continue;
+          }
+          if (!el || action.value == null) {
+            results.push({ action, success: false, error: `入力欄が見つかりません: ${action.selector || hint}` });
+            continue;
+          }
+          setInputValue(el, action.value);
+          results.push({ action, success: true });
+          continue;
+        }
+
+        if (action.type === 'drawSignature') {
+          if (window.__fabDocumentSigner?.completeDocumentSigning) {
+            const signResult = await window.__fabDocumentSigner.completeDocumentSigning(settings);
+            results.push({ action, success: !!(signResult?.success || !signResult?.needed) });
+          } else {
+            results.push({ action, success: false, error: 'document signer unavailable' });
+          }
+          continue;
+        }
+
+        results.push({ action, success: false, error: `未知のアクション: ${action.type}` });
+      } catch (err) {
+        results.push({ action, success: false, error: err.message });
+      }
+    }
+
+    return {
+      results,
+      allSuccess: results.length > 0 && results.every((r) => r.success)
     };
   }
 
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg.type === 'EXECUTE_BID') {
       executeBid(msg.bidData, msg.settings).then(sendResponse);
+      return true;
+    }
+    if (msg.type === 'EXECUTE_AI_ACTIONS') {
+      executeAiActions(msg.actions, msg.settings).then(sendResponse);
       return true;
     }
     if (msg.type === 'GET_PROJECT_DATA') {
@@ -844,5 +993,5 @@
     }
   });
 
-  window.__fabBidHandler = { executeBid, getProjectData, getBidCount };
+  window.__fabBidHandler = { executeBid, executeAiActions, getProjectData, getBidCount };
 })();

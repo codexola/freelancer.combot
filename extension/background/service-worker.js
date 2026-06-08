@@ -54,7 +54,7 @@ let monitorTabId = null;
 const bidQueue = [];
 const activeBidProjectIds = new Set();
 const projectBidTabs = new Map();
-let activeBidCount = 0;
+let isProcessingBid = false;
 const pendingYoungProjects = new Map();
 let pendingRetryTimer = null;
 let lastScanLog = { at: 0, signature: '' };
@@ -68,6 +68,17 @@ const BID_SCRIPT_FILES = ['content/document-signer.js', 'content/bid-handler.js'
 
 async function isBotRunning() {
   return (await getSettings()).isRunning;
+}
+
+function hasAiProblemSolver(settings) {
+  return !!(settings?.claudeApiKey || settings?.openaiApiKey);
+}
+
+async function setMonitorScanPaused(paused) {
+  if (!monitorTabId) return;
+  await chrome.tabs
+    .sendMessage(monitorTabId, { type: paused ? 'PAUSE_SCAN' : 'RESUME_SCAN' })
+    .catch(() => {});
 }
 
 async function injectMonitorScripts(tabId) {
@@ -434,6 +445,23 @@ async function runBrowserBid(project, projectData, bidData, settings, bidPageUrl
   const pageDataRes = await chrome.tabs.sendMessage(tabId, { type: 'GET_PROJECT_DATA' }).catch(() => null);
   let mergedProjectData = { ...projectData, ...(pageDataRes || {}) };
 
+  if (mergedProjectData.preferredFreelancerRequired) {
+    return {
+      failed: true,
+      skipped: true,
+      tabId,
+      projectData: mergedProjectData,
+      result: {
+        success: false,
+        skipped: true,
+        reason: 'preferred_freelancer_required',
+        error: 'You must be a Preferred Freelancer',
+        message: 'Preferred Freelancer必須のため入札不可',
+        closeTab: true
+      }
+    };
+  }
+
   const pageFilter = evaluateProjectFilters(mergedProjectData, settings);
   if (!pageFilter.pass) {
     return {
@@ -471,9 +499,14 @@ async function runBrowserBid(project, projectData, bidData, settings, bidPageUrl
     }
   }
 
-  if (!result?.success && slowMode) {
-    const solveResult = await attemptProblemSolve(tabId, project, result, settings);
-    if (solveResult?.resolved) {
+  if (!result?.success && !result?.skipped && !result?.needsDocumentSign && hasAiProblemSolver(settings)) {
+    const maxSolveRounds = slowMode ? 3 : 2;
+    for (let round = 0; round < maxSolveRounds && !result?.success; round++) {
+      const solveResult = await attemptProblemSolve(tabId, project, result, settings, bidData);
+      if (!solveResult?.resolved) break;
+
+      await sleep(2000);
+      await ensureBidContentScript(tabId, scriptTimeout);
       result = await chrome.tabs
         .sendMessage(tabId, { type: 'EXECUTE_BID', bidData, settings })
         .catch(() => result);
@@ -565,7 +598,7 @@ function schedulePendingRetries() {
       }
     }
 
-    if (await isBotRunning()) {
+    if (await isBotRunning() && !isProcessingBid) {
       for (const item of ready) {
         await markProjectProcessed(item.project.projectId, 'deferred');
         await processProjectThroughPipeline(item.project, item.settings, { isNew: false });
@@ -579,6 +612,7 @@ function schedulePendingRetries() {
 
 async function enqueueProject(project, settings) {
   if (!(await isBotRunning())) return false;
+  if (isProcessingBid) return false;
   if (await isProjectInFlight(project.projectId)) return false;
 
   const graceSec = settings.bidExecutionGraceSec ?? 180;
@@ -600,11 +634,9 @@ async function enqueueProject(project, settings) {
     status: 'queued',
     bidCount: project.bidCount
   });
-  const parallelNote =
-    activeBidCount > 0 ? ` — 並列入札（他 ${activeBidCount}件処理中）` : '';
   await addBidLog({
     level: 'info',
-    message: `新規プロジェクト検出: ${project.title} (${project.bidCount ?? '?'} bids)${parallelNote}`,
+    message: `入札キュー追加: ${project.title} (${project.bidCount ?? '?'} bids)`,
     projectId: project.projectId
   });
   return true;
@@ -688,6 +720,16 @@ async function handleDetectedProjects(projects, { seedBaseline = false } = {}) {
   const settings = await getSettings();
   if (!settings.isRunning) return { ok: false, reason: 'not_running' };
 
+  if (isProcessingBid && !seedBaseline) {
+    await addFilterStatusEntry({
+      status: 'deferred',
+      level: 'info',
+      title: 'WAIT',
+      message: `入札処理中 — 新規 ${projects.length}件の検出を現在の入札完了後まで保留`
+    });
+    return { ok: true, deferred: true, reason: 'bid_in_progress' };
+  }
+
   await clearStaleQueuedProjects();
 
   const sorted = [...projects]
@@ -730,34 +772,47 @@ async function handleDetectedProjects(projects, { seedBaseline = false } = {}) {
   return { ok: true, queued: bidQueue.length, processed: sorted.length };
 }
 
-function dispatchBidJob(project, settings) {
-  void (async () => {
-    if (!(await isBotRunning())) return;
-    if (activeBidProjectIds.has(project.projectId)) return;
-
-    activeBidProjectIds.add(project.projectId);
-    activeBidCount++;
-    try {
-      await executeBidFlow(project, settings);
-    } finally {
-      activeBidProjectIds.delete(project.projectId);
-      projectBidTabs.delete(project.projectId);
-      activeBidCount--;
-    }
-  })();
-}
-
 async function processBidQueue() {
-  if (bidQueue.length === 0) return;
+  if (isProcessingBid || bidQueue.length === 0) return;
   if (!(await isBotRunning())) {
     bidQueue.length = 0;
     return;
   }
 
-  const batch = bidQueue.splice(0);
-  for (const item of batch) {
-    dispatchBidJob(item.project, item.settings);
+  isProcessingBid = true;
+  await setMonitorScanPaused(true);
+
+  try {
+    while (bidQueue.length > 0 && (await isBotRunning())) {
+      const item = bidQueue.shift();
+      activeBidProjectIds.add(item.project.projectId);
+      try {
+        await executeBidFlow(item.project, item.settings);
+      } finally {
+        activeBidProjectIds.delete(item.project.projectId);
+      }
+    }
+  } finally {
+    isProcessingBid = false;
+    await setMonitorScanPaused(false);
+    if (bidQueue.length > 0 && (await isBotRunning())) {
+      void processBidQueue();
+    }
   }
+}
+
+function shouldCloseBidTab(result) {
+  if (!result) return false;
+  if (result.closeTab) return true;
+  if (result.reason === 'preferred_freelancer_required') return true;
+  const text = `${result.error || ''} ${result.message || ''} ${result.reason || ''}`.toLowerCase();
+  return /preferred freelancer/.test(text);
+}
+
+async function closeProjectBidTab(tabId, projectId) {
+  if (projectId) projectBidTabs.delete(projectId);
+  if (!tabId) return;
+  await chrome.tabs.remove(tabId).catch(() => {});
 }
 
 async function openProjectBidTab(bidUrl, projectId) {
@@ -796,6 +851,8 @@ async function executeBidFlow(project, initialSettings) {
   let tabId = null;
   let proposal = '';
   let bidPageUrl = '';
+  let bidSucceeded = false;
+  let result = null;
   const slowMode = settings.slowNetworkMode !== false;
 
   try {
@@ -816,7 +873,9 @@ async function executeBidFlow(project, initialSettings) {
     const bidModeLabel = shouldTryApiBid(settings)
       ? 'API → ブラウザ自動切替'
       : 'ブラウザ（OAuth未設定）';
-    await recordFilterStatus(project, 'bidding', { message: `入札処理中（${bidModeLabel}）` });
+    await recordFilterStatus(project, 'bidding', {
+      message: `入札処理中（順次・${bidModeLabel}）— 完了まで次のプロジェクトは保留`
+    });
 
     let projectData = await enrichProjectViaMonitor(project);
     const preFilter = evaluateProjectFilters(projectData, settings);
@@ -888,7 +947,6 @@ async function executeBidFlow(project, initialSettings) {
       bidType: projectData.bidType
     };
 
-    let result = null;
     let bidMethod = 'browser';
 
     if (shouldTryApiBid(settings)) {
@@ -941,6 +999,15 @@ async function executeBidFlow(project, initialSettings) {
       tabId = browserOutcome.tabId;
 
       if (browserOutcome.failed) {
+        if (browserOutcome.skipped && browserOutcome.result?.reason === 'preferred_freelancer_required') {
+          await skipProject(
+            project,
+            'preferred_freelancer_required',
+            browserOutcome.result.message || 'Preferred Freelancer必須のため入札不可',
+            settings
+          );
+          return;
+        }
         if (browserOutcome.skipped && browserOutcome.filter) {
           await skipProject(
             project,
@@ -974,8 +1041,19 @@ async function executeBidFlow(project, initialSettings) {
       }
     }
 
+    if (result?.reason === 'preferred_freelancer_required') {
+      await skipProject(
+        project,
+        'preferred_freelancer_required',
+        result.message || 'Preferred Freelancer必須のため入札不可',
+        settings
+      );
+      return;
+    }
+
     const elapsed = Date.now() - startTime;
     const finalStatus = result?.success ? 'bid_placed' : result?.skipped ? 'skipped' : 'failed';
+    if (result?.success) bidSucceeded = true;
     await markProjectProcessed(project.projectId, finalStatus);
     await archiveProjectResult(project, finalStatus, {
       reason: result?.reason || result?.error,
@@ -1023,7 +1101,11 @@ async function executeBidFlow(project, initialSettings) {
     await markProjectProcessed(project.projectId, 'error');
   } finally {
     activeBidProjectIds.delete(project.projectId);
-    projectBidTabs.delete(project.projectId);
+    if (tabId && (!bidSucceeded || shouldCloseBidTab(result))) {
+      await closeProjectBidTab(tabId, project.projectId);
+    } else {
+      projectBidTabs.delete(project.projectId);
+    }
   }
 }
 
@@ -1066,12 +1148,26 @@ async function handleDocumentSigning(tabId, settings, prevResult, bidData) {
   return prevResult;
 }
 
-async function attemptProblemSolve(tabId, project, result, settings) {
+async function attemptProblemSolve(tabId, project, result, settings, bidData = null) {
+  if (!hasAiProblemSolver(settings)) {
+    return { resolved: false, error: 'AI APIキー未設定' };
+  }
+
   try {
     const context = `プロジェクト: ${project.title || 'unknown'}
 エラー: ${result?.error || result?.reason || 'unknown'}
-入札者数: ${project.bidCount}
-ページURL: ${project.url || ''}`;
+メッセージ: ${result?.message || ''}
+入札者数: ${project.bidCount ?? 'unknown'}
+ページURL: ${project.url || ''}
+入札タイプ: ${bidData?.bidType || project.bidType || 'unknown'}
+提案文文字数: ${bidData?.proposal?.length || 0}
+Preferred Freelancer制限: ${result?.reason === 'preferred_freelancer_required' ? 'yes' : 'no'}
+
+よくある問題:
+- ピンクの「Place Bid」ボタンがページ最下部にある
+- 提案文は100文字以上必要
+- IP Agreement署名が必要な場合がある
+- fl-button / fl-textarea などのカスタム要素を使用`;
 
     const solveResult = await solveProblem(tabId, context, settings, analyzeProblem);
     await addBidLog({
@@ -1217,7 +1313,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === 'poll_projects') {
     const settings = await getSettings();
-    if (!settings.isRunning) return;
+    if (!settings.isRunning || isProcessingBid) return;
     const tabId = await ensureMonitorTab();
     await chrome.tabs.sendMessage(tabId, { type: 'SCAN_PROJECTS' }).catch(() => {});
   }
