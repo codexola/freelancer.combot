@@ -462,6 +462,11 @@ async function runBrowserBid(project, projectData, bidData, settings, bidPageUrl
     };
   }
 
+  const activeBidData = {
+    ...bidData,
+    bidType: mergedProjectData.bidType || bidData.bidType
+  };
+
   const pageFilter = evaluateProjectFilters(mergedProjectData, settings);
   if (!pageFilter.pass) {
     return {
@@ -480,7 +485,7 @@ async function runBrowserBid(project, projectData, bidData, settings, bidPageUrl
     await sleep(1200);
 
     result = await chrome.tabs
-      .sendMessage(tabId, { type: 'EXECUTE_BID', bidData, settings })
+      .sendMessage(tabId, { type: 'EXECUTE_BID', bidData: activeBidData, settings })
       .catch(() => ({ success: false, error: 'content script通信失敗' }));
 
     if (result?.success) break;
@@ -493,7 +498,7 @@ async function runBrowserBid(project, projectData, bidData, settings, bidPageUrl
 
   if (!result?.success && (result?.needsDocumentSign || result?.error?.includes('署名'))) {
     if (settings.autoSignDocuments !== false) {
-      result = await handleDocumentSigning(tabId, settings, result, bidData);
+      result = await handleDocumentSigning(tabId, settings, result, activeBidData);
     } else {
       result = { success: false, skipped: true, error: '書類署名が必要（自動署名オフ）' };
     }
@@ -502,13 +507,13 @@ async function runBrowserBid(project, projectData, bidData, settings, bidPageUrl
   if (!result?.success && !result?.skipped && !result?.needsDocumentSign && hasAiProblemSolver(settings)) {
     const maxSolveRounds = slowMode ? 3 : 2;
     for (let round = 0; round < maxSolveRounds && !result?.success; round++) {
-      const solveResult = await attemptProblemSolve(tabId, project, result, settings, bidData);
+      const solveResult = await attemptProblemSolve(tabId, project, result, settings, activeBidData);
       if (!solveResult?.resolved) break;
 
       await sleep(2000);
       await ensureBidContentScript(tabId, scriptTimeout);
       result = await chrome.tabs
-        .sendMessage(tabId, { type: 'EXECUTE_BID', bidData, settings })
+        .sendMessage(tabId, { type: 'EXECUTE_BID', bidData: activeBidData, settings })
         .catch(() => result);
     }
   }

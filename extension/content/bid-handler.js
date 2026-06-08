@@ -488,14 +488,17 @@
     const skillEls = document.querySelectorAll('[class*="skill"], fl-tag, [class*="Skill"]');
     const skills = Array.from(skillEls).map((el) => el.textContent.trim()).filter(Boolean);
 
+    const form = findBidForm();
+    const formType = detectBidTypeFromForm(form);
     const pageText = document.body.innerText + budget;
-    const isHourly = /per hour|hourly|\/hr|\/hour|eur\/hour|usd\/hour/i.test(pageText);
+    const pageHourly = /per hour|hourly|\/hr|\/hour|eur\/hour|usd\/hour|cad\/hour/i.test(pageText);
+    const bidType = formType || (pageHourly ? 'hourly' : 'fixed');
     return {
       title,
       description,
       budget,
       skills,
-      bidType: isHourly ? 'hourly' : 'fixed',
+      bidType: bidType === 'hourly' ? 'hourly' : 'fixed',
       bidCount: getBidCount(),
       clientCountry: extractClientCountry(),
       projectLanguage: extractProjectLanguage(),
@@ -573,25 +576,123 @@
     if (match) clickElement(match);
   }
 
+  function getFieldContext(resolved, wrapper) {
+    return [
+      resolved?.placeholder,
+      resolved?.name,
+      resolved?.id,
+      resolved?.getAttribute('aria-label'),
+      wrapper?.getAttribute?.('aria-label'),
+      wrapper?.closest?.('label')?.textContent,
+      wrapper?.closest?.('[class*="field"], [class*="Field"], .form-group')?.textContent,
+      wrapper?.parentElement?.textContent?.slice(0, 160)
+    ]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase();
+  }
+
   function findInputByContext(keywords, root) {
     const inputs = queryDeep('input, textarea, select, fl-input, fl-text-field', root || document);
     for (const input of inputs) {
       const resolved = resolveFocusableInput(input) || input;
-      const context = [
-        resolved.placeholder,
-        resolved.name,
-        resolved.id,
-        resolved.getAttribute('aria-label'),
-        input.getAttribute('aria-label'),
-        input.closest('label')?.textContent,
-        input.closest('[class*="field"], [class*="Field"], .form-group')?.textContent
-      ]
-        .filter(Boolean)
-        .join(' ')
-        .toLowerCase();
+      const context = getFieldContext(resolved, input);
       if (keywords.some((k) => context.includes(k))) return resolved;
     }
     return null;
+  }
+
+  function inputHasValue(input) {
+    const value = readInputValue(input);
+    return value.length > 0 && !/^0+(\.0+)?$/.test(value);
+  }
+
+  function detectBidTypeFromForm(form) {
+    const root = form || findBidForm();
+    const text = (root.textContent || '').toLowerCase();
+    if (/per hour|\/\s*hour|hourly rate|eur\s*\/\s*hour|usd\s*\/\s*hour|gbp\s*\/\s*hour/.test(text)) {
+      return 'hourly';
+    }
+    if (/bid amount|delivered in|delivery time|delivery period/.test(text)) {
+      return 'fixed';
+    }
+    if (findInputByContext(['hourly', 'rate', 'per hour', '/ hour'], root)) return 'hourly';
+    if (findInputByContext(['bid amount', 'delivered in', 'delivery'], root)) return 'fixed';
+    return null;
+  }
+
+  function findLabelLinkedInput(labelPatterns, form) {
+    const labels = queryDeep('label, fl-label, span, div, p, h3, h4, fl-heading', form);
+    for (const label of labels) {
+      const labelText = (label.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      if (labelText.length > 80) continue;
+      if (!labelPatterns.some((p) => labelText.includes(p))) continue;
+
+      const container =
+        label.closest(
+          'fl-input, fl-text-field, fl-number-input, [class*="field"], [class*="Field"], section, div'
+        ) || label.parentElement;
+
+      const candidates = [
+        container?.querySelector('input, textarea, fl-input, fl-text-field'),
+        label.nextElementSibling,
+        label.parentElement?.querySelector('input, textarea, fl-input')
+      ].filter(Boolean);
+
+      for (const candidate of candidates) {
+        const resolved = resolveFocusableInput(candidate);
+        if (resolved && isVisible(resolved)) return resolved;
+      }
+
+      const deepInputs = queryDeep('input, textarea', container || form);
+      for (const raw of deepInputs) {
+        const resolved = resolveFocusableInput(raw);
+        if (resolved && isVisible(resolved)) return resolved;
+      }
+    }
+    return null;
+  }
+
+  function findFirstNumericInputInBidForm(form, { excludeDelivery = true } = {}) {
+    const inputs = queryDeep(
+      'input[type="number"], input[inputmode="decimal"], input[type="text"], input:not([type])',
+      form
+    );
+    for (const raw of inputs) {
+      const resolved = resolveFocusableInput(raw);
+      if (!resolved || !isVisible(resolved)) continue;
+      const ctx = getFieldContext(resolved, raw);
+      if (excludeDelivery && /deliver|days|delivery|period|time/.test(ctx)) continue;
+      if (/proposal|describe your|candidate|name|email|search|phone/.test(ctx)) continue;
+      if (resolved.type === 'text' && !/amount|bid|rate|hour|price|\$|€|£/.test(ctx)) continue;
+      return resolved;
+    }
+    return null;
+  }
+
+  function findBidAmountInput(form) {
+    return (
+      findLabelLinkedInput(['bid amount', 'this bid', 'your bid'], form) ||
+      findInputByContext(['bid amount', 'this bid', 'your bid', 'amount', 'price'], form) ||
+      findFirstNumericInputInBidForm(form, { excludeDelivery: true })
+    );
+  }
+
+  function findHourlyRateInput(form) {
+    return (
+      findLabelLinkedInput(['hourly', 'per hour', '/ hour', 'rate'], form) ||
+      findInputByContext(['hourly', 'rate', 'per hour', '/ hour', 'eur / hour', 'usd / hour'], form) ||
+      findFirstNumericInputInBidForm(form, { excludeDelivery: true })
+    );
+  }
+
+  function resolveBidType(bidData, form) {
+    const formType = detectBidTypeFromForm(form);
+    let isHourly = bidData.bidType === 'hourly';
+    if (formType) isHourly = formType === 'hourly';
+    if (!isHourly && !findBidAmountInput(form) && findHourlyRateInput(form)) isHourly = true;
+    if (isHourly && !findHourlyRateInput(form) && findBidAmountInput(form)) isHourly = false;
+    return isHourly ? 'hourly' : 'fixed';
   }
 
   async function commitFormValues(form) {
@@ -606,29 +707,30 @@
 
   async function fillBidForm(bidData, settings) {
     const form = findBidForm();
-    const isHourly = bidData.bidType === 'hourly';
+    const bidType = resolveBidType(bidData, form);
+    const isHourly = bidType === 'hourly';
     const missing = [];
+    const warnings = [];
 
     if (isHourly) {
-      const rateInput =
-        findInputByContext(['hourly', 'rate', 'per hour', '/ hour', 'amount'], form) ||
-        Array.from(form.querySelectorAll('input[type="number"], input[inputmode="decimal"]')).find(
-          (el) => !findInputByContext(['delivery', 'days'], el.parentElement)
-        );
-      if (!rateInput) missing.push('hourly rate');
-      else setInputValue(rateInput, bidData.hourlyRate || settings.defaultHourlyRate);
+      const rateInput = findHourlyRateInput(form);
+      if (!rateInput) {
+        warnings.push('hourly rate');
+      } else if (!inputHasValue(rateInput)) {
+        setInputValue(rateInput, bidData.hourlyRate || settings.defaultHourlyRate);
+      }
     } else {
-      const amountInput =
-        findInputByContext(['bid amount', 'amount', 'price', 'your bid', 'this bid'], form) ||
-        form.querySelector('input[type="number"], input[inputmode="decimal"]');
-      if (!amountInput) missing.push('bid amount');
-      else setInputValue(amountInput, bidData.bidAmount || settings.defaultBidAmount);
+      const amountInput = findBidAmountInput(form);
+      if (!amountInput) {
+        warnings.push('bid amount');
+      } else if (!inputHasValue(amountInput)) {
+        setInputValue(amountInput, bidData.bidAmount || settings.defaultBidAmount);
+      }
 
-      const deliveryInput = findInputByContext(
-        ['delivered in', 'delivery', 'days', 'time', 'period'],
-        form
-      );
-      if (deliveryInput) {
+      const deliveryInput =
+        findLabelLinkedInput(['delivered in', 'delivery', 'days'], form) ||
+        findInputByContext(['delivered in', 'delivery', 'days', 'time', 'period'], form);
+      if (deliveryInput && !inputHasValue(deliveryInput)) {
         setInputValue(deliveryInput, bidData.deliveryDays || settings.defaultDeliveryDays);
       }
     }
@@ -657,13 +759,28 @@
       }
     }
 
+    const canPlaceBid = !!findPlaceBidButton();
+    const hasProposalField = !!findProposalInput();
+
+    if (warnings.length && (canPlaceBid || hasProposalField)) {
+      warnings.length = 0;
+    }
+
     if (missing.length) {
       return { ok: false, error: `フォーム入力失敗: ${missing.join(', ')} が見つかりません` };
     }
 
+    if (warnings.length && !canPlaceBid) {
+      return { ok: false, error: `入札フォームの金額欄が見つかりません（Place Bidボタンも未検出）` };
+    }
+
     await commitFormValues(form);
     await scrollToPlaceBidButton();
-    return { ok: true };
+    return {
+      ok: true,
+      bidType,
+      warning: warnings.length ? `${warnings.join(', ')} はスキップして Place Bid に進みます` : undefined
+    };
   }
 
   function isPlaceBidLabel(text) {
@@ -835,8 +952,22 @@
       };
     }
 
-    const fillResult = await fillBidForm({ ...bidData, ...projectData }, settings);
-    if (!fillResult.ok) return { success: false, error: fillResult.error };
+    const mergedBidData = {
+      ...bidData,
+      ...projectData,
+      bidType: projectData.bidType || bidData.bidType
+    };
+    const fillResult = await fillBidForm(mergedBidData, settings);
+    if (!fillResult.ok) {
+      if (findPlaceBidButton() && findProposalInput() && mergedBidData.proposal) {
+        const proposalOnly = findProposalInput();
+        setInputValue(proposalOnly, String(mergedBidData.proposal).slice(0, 1500));
+        await commitFormValues(findBidForm());
+        await scrollToPlaceBidButton();
+      } else {
+        return { success: false, error: fillResult.error, projectData };
+      }
+    }
 
     const slow = settings?.slowNetworkMode !== false;
     const maxRounds = slow ? 4 : 3;
