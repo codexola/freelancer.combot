@@ -8,6 +8,7 @@ import {
   saveSettings,
   getStats,
   recordBidAttempt,
+  saveBidRecord,
   markProjectProcessed,
   getProcessedProjects,
   isProjectInFlight,
@@ -579,17 +580,19 @@ async function ensureBidWorkerTab(bidUrl) {
     try {
       const tab = await chrome.tabs.get(bidWorkerTabId);
       if (tab?.id) {
-        await chrome.tabs.update(bidWorkerTabId, { url: bidUrl, active: false });
+        await chrome.tabs.update(bidWorkerTabId, { url: bidUrl, active: true });
         await waitForTabLoad(bidWorkerTabId, loadTimeout);
+        await sleep(2500);
         return bidWorkerTabId;
       }
     } catch {
       bidWorkerTabId = null;
     }
   }
-  const tab = await chrome.tabs.create({ url: bidUrl, active: false });
+  const tab = await chrome.tabs.create({ url: bidUrl, active: true });
   bidWorkerTabId = tab.id;
   await waitForTabLoad(tab.id, loadTimeout);
+  await sleep(2500);
   return tab.id;
 }
 
@@ -600,6 +603,8 @@ function settingsSlowMs() {
 async function executeBidFlow(project, settings) {
   const startTime = Date.now();
   let tabId = null;
+  let proposal = '';
+  let bidPageUrl = '';
   const slowMode = settings.slowNetworkMode !== false;
 
   try {
@@ -634,13 +639,17 @@ async function executeBidFlow(project, settings) {
       return;
     }
 
-    let proposal = '';
+    bidPageUrl = normalizeDetailsUrl(projectData.url || project.url);
+
     try {
       proposal = await generateProposal(settings, projectData);
-      await addBidLog({
-        level: 'info',
-        message: `AI入札文生成完了 (${proposal.length}文字)`,
-        projectId: project.projectId
+      await saveBidRecord({
+        projectId: project.projectId,
+        title: project.title,
+        url: bidPageUrl,
+        proposal,
+        status: 'in_progress',
+        message: `AI入札文生成完了 (${proposal.length}文字)`
       });
     } catch (apiErr) {
       if (settings.requireAiProposal !== false) {
@@ -671,8 +680,7 @@ async function executeBidFlow(project, settings) {
     }
 
     if (!result?.success) {
-      const bidUrl = normalizeDetailsUrl(projectData.url || project.url);
-      tabId = await ensureBidWorkerTab(bidUrl);
+      tabId = await ensureBidWorkerTab(bidPageUrl);
 
       const scriptTimeout = slowMode ? 50000 : OCTO_CONTENT_SCRIPT_MS;
       const scriptReady = await ensureBidContentScript(tabId, scriptTimeout);
@@ -685,6 +693,8 @@ async function executeBidFlow(project, settings) {
           success: false,
           projectId: project.projectId,
           title: project.title,
+          url: bidPageUrl,
+          proposal,
           message: 'content script通信失敗（タイムアウト）',
           level: 'error'
         });
@@ -748,7 +758,8 @@ async function executeBidFlow(project, settings) {
       skipped: !!result?.skipped,
       projectId: project.projectId,
       title: project.title,
-      url: project.url,
+      url: bidPageUrl,
+      proposal,
       bidCount: project.bidCount,
       elapsedMs: elapsed,
       message: result?.message || result?.error || result?.reason || '完了',
@@ -772,6 +783,8 @@ async function executeBidFlow(project, settings) {
       success: false,
       projectId: project.projectId,
       title: project.title,
+      url: bidPageUrl || normalizeDetailsUrl(project.url),
+      proposal,
       message: err.message,
       level: 'error'
     });

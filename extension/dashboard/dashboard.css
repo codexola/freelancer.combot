@@ -377,3 +377,130 @@ body {
 .history-status.success { color: var(--success); }
 .history-status.error { color: var(--danger); }
 .history-status.warn { color: var(--warning); }
+
+.bid-log-list {
+  max-height: 360px;
+}
+
+.bid-log-hint {
+  margin-top: 8px;
+  font-size: 0.75rem;
+}
+
+.bid-record-item {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.bid-record-item:hover {
+  background: var(--surface2);
+}
+
+.bid-record-item .bid-record-title {
+  font-weight: 600;
+  font-size: 0.85rem;
+  margin-bottom: 4px;
+}
+
+.bid-record-item .bid-record-meta {
+  display: flex;
+  gap: 10px;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  flex-wrap: wrap;
+}
+
+.bid-record-status {
+  font-weight: 600;
+}
+
+.bid-record-status.success { color: var(--success); }
+.bid-record-status.failed { color: var(--danger); }
+.bid-record-status.attempted,
+.bid-record-status.in_progress { color: var(--warning); }
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 20px;
+}
+
+.modal-overlay.hidden {
+  display: none;
+}
+
+.modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  width: min(720px, 100%);
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+}
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.modal-header h3 {
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.modal-close {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 1.5rem;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.modal-close:hover {
+  color: var(--text);
+}
+
+.modal-meta {
+  padding: 12px 20px 0;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.modal-proposal {
+  margin: 12px 20px;
+  padding: 14px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: auto;
+  flex: 1;
+  min-height: 200px;
+  max-height: 50vh;
+  font-family: inherit;
+  font-size: 0.82rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.modal-footer {
+  padding: 12px 20px 16px;
+  border-top: 1px solid var(--border);
+}
+
+.hidden {
+  display: none !important;
+}

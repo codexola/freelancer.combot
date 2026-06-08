@@ -4,7 +4,10 @@
 
 export async function captureScreenshot(tabId) {
   try {
-    const dataUrl = await chrome.tabs.captureVisibleTab(null, { format: 'png' });
+    const tab = await chrome.tabs.get(tabId);
+    await chrome.tabs.update(tabId, { active: true });
+    await sleep(400);
+    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
     return dataUrl.replace(/^data:image\/png;base64,/, '');
   } catch (err) {
     console.error('Screenshot failed:', err);

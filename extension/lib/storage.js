@@ -66,7 +66,7 @@ export const DEFAULT_STATS = {
   skippedBids: 0,
   lastBidAt: null,
   bidHistory: [],
-  activeBids: [],
+  bidRecords: [],
   recentLogs: []
 };
 
@@ -126,6 +126,32 @@ export async function addBidLog(entry) {
   return log;
 }
 
+export async function saveBidRecord(entry) {
+  const stats = await getStats();
+  const records = stats.bidRecords || [];
+  const idx = records.findIndex((r) => r.projectId === entry.projectId && entry.projectId);
+  const existing = idx >= 0 ? records[idx] : null;
+  const record = {
+    id: entry.id || existing?.id || crypto.randomUUID(),
+    timestamp: existing?.timestamp || entry.timestamp || new Date().toISOString(),
+    projectId: entry.projectId || '',
+    title: entry.title || existing?.title || '',
+    url: entry.url || existing?.url || '',
+    proposal: entry.proposal || existing?.proposal || '',
+    status: entry.status || existing?.status || 'attempted',
+    message: entry.message ?? existing?.message ?? ''
+  };
+  if (idx >= 0) {
+    records[idx] = record;
+  } else {
+    records.unshift(record);
+  }
+  if (records.length > 200) records.length = 200;
+  stats.bidRecords = records;
+  await saveStats(stats);
+  return record;
+}
+
 export async function recordBidAttempt(result) {
   const stats = await getStats();
   const today = new Date().toDateString();
@@ -133,14 +159,26 @@ export async function recordBidAttempt(result) {
     stats.todayBids = 0;
     stats.todayDate = today;
   }
-  stats.totalBids++;
-  stats.todayBids++;
-  stats.lastBidAt = new Date().toISOString();
-  if (result.success) stats.successfulBids++;
-  else if (result.skipped) stats.skippedBids++;
-  else stats.failedBids++;
+  if (!result.skipped) {
+    stats.totalBids++;
+    stats.todayBids++;
+    stats.lastBidAt = new Date().toISOString();
+    if (result.success) stats.successfulBids++;
+    else stats.failedBids++;
+  } else {
+    stats.skippedBids++;
+  }
   await saveStats(stats);
-  await addBidLog(result);
+  if (result.proposal?.trim() || result.url) {
+    await saveBidRecord({
+      projectId: result.projectId,
+      title: result.title,
+      url: result.url,
+      proposal: result.proposal || '',
+      status: result.success ? 'success' : result.skipped ? 'skipped' : 'failed',
+      message: result.message || ''
+    });
+  }
 }
 
 export async function deleteSettings() {

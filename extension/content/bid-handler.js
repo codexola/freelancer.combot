@@ -24,6 +24,57 @@
     return true;
   }
 
+  function getElementLabel(el) {
+    return [
+      el.textContent,
+      el.value,
+      el.getAttribute('aria-label'),
+      el.getAttribute('title')
+    ]
+      .filter(Boolean)
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function isVisible(el) {
+    if (!el) return false;
+    if (el.offsetParent !== null) return true;
+    const rect = el.getBoundingClientRect?.();
+    return rect && rect.width > 0 && rect.height > 0;
+  }
+
+  function clickElement(el) {
+    if (!el) return false;
+    try {
+      el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
+    } catch {
+      /* ignore */
+    }
+    const target = el.closest('fl-button') || el.querySelector('button, a') || el;
+    if (target.disabled) return false;
+    for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+      target.dispatchEvent(
+        new MouseEvent(type, { bubbles: true, cancelable: true, view: window })
+      );
+    }
+    if (typeof target.click === 'function') target.click();
+    return true;
+  }
+
+  async function scrollToBidSection() {
+    const targets = [findPlaceBidButton(), findOpenBidButton(), findProposalInput(), findBidForm()].filter(
+      Boolean
+    );
+    const target = targets[0];
+    if (target?.scrollIntoView) {
+      target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    } else {
+      window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+    }
+    await sleep(700);
+  }
+
   function normalizePageUrl() {
     let path = window.location.pathname.replace(/\.html/gi, '');
     if (!/\/details\/?$/i.test(path)) {
@@ -50,7 +101,7 @@
   }
 
   function findProposalInput() {
-    const textareas = document.querySelectorAll('textarea');
+    const textareas = Array.from(document.querySelectorAll('textarea')).filter(isVisible);
     for (const ta of textareas) {
       const ctx = [
         ta.placeholder,
@@ -68,23 +119,41 @@
       }
     }
     const form = findBidForm();
-    const inForm = form.querySelector('textarea');
-    if (inForm) return inForm;
-    return document.querySelector('textarea');
+    const inForm = Array.from(form.querySelectorAll('textarea')).filter(isVisible);
+    if (inForm.length === 1) return inForm[0];
+    if (inForm.length > 1) {
+      inForm.sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top);
+      return inForm[0];
+    }
+    if (textareas.length) {
+      textareas.sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top);
+      return textareas[0];
+    }
+    return null;
   }
 
   function hasBidFormVisible() {
     if (findProposalInput()) return true;
-    return /place a bid on this project/i.test(document.body.innerText || '');
+    if (findPlaceBidButton()) return true;
+    const form = findBidForm();
+    if (findInputByContext(['bid amount', 'amount', 'hourly', 'delivered in', 'delivery'], form)) {
+      return true;
+    }
+    return /place a bid on this project|your bid amount|write.*proposal|delivery.*days|what makes you the best/i.test(
+      document.body.innerText || ''
+    );
   }
 
   function findOpenBidButton() {
-    const buttons = document.querySelectorAll('button, fl-button, a, [role="button"]');
+    const buttons = document.querySelectorAll(
+      'button, fl-button, a, [role="button"], [class*="Button"], [class*="btn"]'
+    );
     return Array.from(buttons).find((b) => {
-      const text = (b.textContent || '').trim();
-      return (
-        /place a bid on this project|bid on this project|place a bid|bid now/i.test(text) &&
-        !/place bid$/i.test(text)
+      if (!isVisible(b)) return false;
+      const text = getElementLabel(b);
+      if (/^place bid$/i.test(text) || /^submit bid$/i.test(text)) return false;
+      return /place a bid on this project|bid on this project|place bid on this|start bidding|write a bid|submit your bid/i.test(
+        text
       );
     });
   }
@@ -94,6 +163,8 @@
     const start = Date.now();
 
     while (Date.now() - start < timeout) {
+      await scrollToBidSection();
+
       if (window.__fabDocumentSigner?.isDocumentSigningPage?.()) {
         const signResult = await window.__fabDocumentSigner.completeDocumentSigning(settings);
         if (signResult.needed && !signResult.success) {
@@ -103,23 +174,25 @@
         continue;
       }
 
-      if (hasBidFormVisible() && findProposalInput()) {
+      const proposalInput = findProposalInput();
+      const placeBidBtn = findPlaceBidButton();
+      if (proposalInput || placeBidBtn) {
         return { ready: true };
       }
 
       const openBtn = findOpenBidButton();
       if (openBtn) {
-        openBtn.click();
-        await sleep(1500);
+        clickElement(openBtn);
+        await sleep(2200);
         continue;
       }
 
       if (hasBidFormVisible()) {
-        await sleep(1000);
-        if (findProposalInput()) return { ready: true };
+        await sleep(1200);
+        if (findProposalInput() || findPlaceBidButton()) return { ready: true };
       }
 
-      await sleep(800);
+      await sleep(900);
     }
 
     return { ready: false, error: '入札フォームを開けませんでした' };
@@ -276,18 +349,33 @@
   }
 
   function findPlaceBidButton() {
-    const buttons = document.querySelectorAll('button, fl-button, [role="button"], a[class*="btn"]');
-    return Array.from(buttons).find((b) => {
-      const text = (b.textContent || '').trim();
-      return /^place bid$/i.test(text) || /^submit bid$/i.test(text);
+    const buttons = document.querySelectorAll(
+      'button, fl-button, [role="button"], a, input[type="submit"], [class*="Button"], [class*="btn"]'
+    );
+    const matches = Array.from(buttons).filter((b) => {
+      const text = getElementLabel(b);
+      return /^place\s+bid$/i.test(text) || /^submit\s+bid$/i.test(text);
     });
+    if (!matches.length) return null;
+    matches.sort((a, b) => {
+      const ay = a.getBoundingClientRect?.().top || 0;
+      const by = b.getBoundingClientRect?.().top || 0;
+      return by - ay;
+    });
+    return matches.find(isVisible) || matches[0];
   }
 
   async function clickPlaceBid() {
-    const btn = findPlaceBidButton();
+    await scrollToBidSection();
+    let btn = findPlaceBidButton();
+    if (!btn) {
+      await sleep(1200);
+      await scrollToBidSection();
+      btn = findPlaceBidButton();
+    }
     if (!btn) return { success: false, error: 'Place Bidボタンが見つかりません' };
-    btn.click();
-    await sleep(2000);
+    clickElement(btn);
+    await sleep(2800);
     return { success: true };
   }
 

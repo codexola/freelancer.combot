@@ -238,28 +238,67 @@ function renderStats() {
     ? new Date(currentStats.lastBidAt).toLocaleTimeString('ja-JP')
     : '-';
 
+  renderBidRecords();
+}
+
+function renderBidRecords() {
   const logList = $('logList');
+  if (!logList) return;
   logList.innerHTML = '';
-  (currentStats.recentLogs || []).forEach((log) => {
+
+  const records = (currentStats.bidRecords || []).filter((r) => r.proposal?.trim());
+  if (!records.length) {
+    logList.innerHTML = '<div class="log-item info">入札を試行したプロジェクトはまだありません。</div>';
+    return;
+  }
+
+  records.slice(0, 100).forEach((record) => {
     const div = document.createElement('div');
-    div.className = `log-item ${log.level || 'info'}`;
-    div.innerHTML = `<span class="log-time">${formatTime(log.time)}</span> ${escHtml(log.message)}`;
+    div.className = 'bid-record-item';
+    div.dataset.recordId = record.id || '';
+    const status = record.status || 'attempted';
+    const statusLabel =
+      status === 'success' ? '成功' : status === 'failed' ? '失敗' : status === 'in_progress' ? '処理中' : '試行';
+    div.innerHTML = `
+      <div class="bid-record-title">${escHtml(record.title || record.projectId || 'プロジェクト')}</div>
+      <div class="bid-record-meta">
+        <span class="bid-record-time">${formatTime(record.timestamp)}</span>
+        <span class="bid-record-status ${escAttr(status)}">${escHtml(statusLabel)}</span>
+        <span>${record.proposal.length}文字</span>
+      </div>
+    `;
+    div.addEventListener('click', () => openProposalModal(record));
     logList.appendChild(div);
   });
+}
 
-  const historyList = $('historyList');
-  historyList.innerHTML = '';
-  (currentStats.bidHistory || []).slice(0, 50).forEach((h) => {
-    const div = document.createElement('div');
-    div.className = 'history-item';
-    const statusClass = h.success ? 'success' : h.skipped ? 'warn' : 'error';
-    div.innerHTML = `
-      <span class="history-time">${formatTime(h.timestamp)}</span>
-      <div class="history-title">${escHtml(h.title || h.projectId || '-')}</div>
-      <div class="history-status ${statusClass}">${escHtml(h.message || h.status || '')}</div>
-    `;
-    historyList.appendChild(div);
-  });
+function openProposalModal(record) {
+  const modal = $('proposalModal');
+  if (!modal) return;
+  $('modalTitle').textContent = record.title || '入札文';
+  $('modalMeta').textContent = [
+    formatTime(record.timestamp),
+    record.status === 'success' ? '入札成功' : record.status === 'failed' ? '入札失敗' : '入札試行',
+    `${(record.proposal || '').length}文字`
+  ].filter(Boolean).join(' · ');
+  $('modalProposal').textContent = record.proposal || '';
+  const link = $('modalLink');
+  if (record.url) {
+    link.href = record.url;
+    link.classList.remove('hidden');
+  } else {
+    link.href = '#';
+    link.classList.add('hidden');
+  }
+  modal.classList.remove('hidden');
+  modal.setAttribute('aria-hidden', 'false');
+}
+
+function closeProposalModal() {
+  const modal = $('proposalModal');
+  if (!modal) return;
+  modal.classList.add('hidden');
+  modal.setAttribute('aria-hidden', 'true');
 }
 
 function formatTime(iso) {
@@ -347,10 +386,18 @@ function setupEventListeners() {
   });
 
   $('btnClearLogs').addEventListener('click', async () => {
-    if (!confirm('ログと履歴をクリアしますか？')) return;
+    if (!confirm('入札ログをクリアしますか？')) return;
     await sendMessage('DELETE_SETTINGS', { target: 'stats' });
     await loadAll();
-    showSaveStatus('ログをクリアしました');
+    showSaveStatus('入札ログをクリアしました');
+  });
+
+  $('modalClose')?.addEventListener('click', closeProposalModal);
+  $('proposalModal')?.addEventListener('click', (e) => {
+    if (e.target.id === 'proposalModal') closeProposalModal();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeProposalModal();
   });
 
   $('btnClearFilterStatus').addEventListener('click', async () => {

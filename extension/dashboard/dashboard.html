@@ -263,12 +263,23 @@
           <h2>入札ログ</h2>
           <button class="btn btn-secondary btn-sm" id="btnClearLogs">ログクリア</button>
         </div>
-        <div class="log-list" id="logList"></div>
-        <div class="panel-header" style="margin-top:16px">
-          <h2>入札履歴</h2>
-        </div>
-        <div class="history-list" id="historyList"></div>
+        <div class="log-list bid-log-list" id="logList"></div>
+        <p class="hint bid-log-hint">入札を試行したプロジェクトのみ表示。クリックで入札文を確認できます。</p>
       </section>
+    </div>
+  </div>
+
+  <div class="modal-overlay hidden" id="proposalModal" aria-hidden="true">
+    <div class="modal" role="dialog" aria-labelledby="modalTitle">
+      <div class="modal-header">
+        <h3 id="modalTitle">入札文</h3>
+        <button type="button" class="modal-close" id="modalClose" aria-label="閉じる">&times;</button>
+      </div>
+      <div class="modal-meta" id="modalMeta"></div>
+      <pre class="modal-proposal" id="modalProposal"></pre>
+      <div class="modal-footer">
+        <a class="btn btn-secondary btn-sm" id="modalLink" href="#" target="_blank" rel="noopener">プロジェクトを開く</a>
+      </div>
     </div>
   </div>
   <script src="dashboard.js" type="module"></script>
