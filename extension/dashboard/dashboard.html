@@ -158,18 +158,19 @@
           <div class="form-group">
             <label>
               <input type="checkbox" id="preferApiBidding" checked>
-              API入札を優先（ページを開かずに入札、NDA時のみブラウザ）
+              API入札を優先（OAuth設定時のみ。未設定時は自動でブラウザ入札）
             </label>
           </div>
           <div class="form-group">
             <label>
               <input type="checkbox" id="apiOnlyBidding" checked>
-              APIのみ入札（遅い回線向け — 書類署名が必要な案件のみブラウザを開く）
+              OAuth設定時はAPIを先に試行（失敗時はブラウザに自動切替）
             </label>
           </div>
           <div class="form-group">
             <label>Freelancer OAuth トークン（任意）</label>
-            <input type="password" id="freelancerOAuthToken" placeholder="API入札用（未設定時はセッションCookieを使用）">
+            <input type="password" id="freelancerOAuthToken" placeholder="未設定時はブラウザ入札を自動使用">
+            <p class="hint">OAuthがなくても入札できます。設定がある場合のみAPI入札を試行し、失敗時はブラウザに切り替わります。</p>
           </div>
         </div>
 
@@ -276,7 +277,7 @@
     </div>
   </div>
 
-  <div class="modal-overlay hidden" id="proposalModal" aria-hidden="true">
+  <div class="modal-overlay hidden" id="proposalModal" aria-hidden="true" inert>
     <div class="modal" role="dialog" aria-labelledby="modalTitle">
       <div class="modal-header">
         <h3 id="modalTitle">入札文</h3>

@@ -166,7 +166,7 @@ export async function placeBidViaApi(project, bidData, settings) {
   const resolved = await resolveProjectForBid(project);
   const numericId = resolved.numericProjectId || resolved.numericId;
   if (!numericId) {
-    return { success: false, skipped: false, error: 'numeric_project_id_missing', needsBrowser: false };
+    return { success: false, skipped: false, error: 'numeric_project_id_missing', needsBrowser: true };
   }
 
   if (resolved.requiresDocument || resolved.isNda) {
@@ -174,7 +174,19 @@ export async function placeBidViaApi(project, bidData, settings) {
   }
 
   const oauthToken = settings.freelancerOAuthToken?.trim();
-  const authHeaders = oauthToken ? { 'freelancer-oauth-v1': oauthToken } : {};
+  if (!oauthToken) {
+    return {
+      success: false,
+      skipped: false,
+      error: 'oauth_token_missing',
+      needsBrowser: true,
+      useBrowser: true
+    };
+  }
+  const authHeaders = { 'freelancer-oauth-v1': oauthToken };
+  if (!oauthToken.startsWith('oauth2_')) {
+    authHeaders.Authorization = `Bearer ${oauthToken}`;
+  }
 
   let bidderId = settings.freelancerUserId || null;
   let profileId = settings.freelancerProfileId || null;
@@ -184,7 +196,7 @@ export async function placeBidViaApi(project, bidData, settings) {
     profileId = pickProfileId(selfInfo.profiles, settings.profileName);
   }
   if (!bidderId) {
-    return { success: false, skipped: false, error: 'bidder_id_unavailable', needsBrowser: false };
+    return { success: false, skipped: false, error: 'bidder_id_unavailable', needsBrowser: true };
   }
 
   const isHourly = (resolved.bidType || bidData.bidType) === 'hourly';
@@ -217,5 +229,5 @@ export async function placeBidViaApi(project, bidData, settings) {
     return { success: false, needsBrowser: true, error: errMsg };
   }
 
-  return { success: false, skipped: false, error: errMsg, needsBrowser: false };
+  return { success: false, skipped: false, error: errMsg, needsBrowser: true };
 }

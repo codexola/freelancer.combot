@@ -11,6 +11,7 @@ import {
   getPortfolioLinks,
   selectRelevantLinks,
   finalizeProposal,
+  finalizeProposalSignature,
   enforceProposalLimit,
   buildProjectAnalysisSummary,
   getProposalLengthBounds,
@@ -92,7 +93,8 @@ IMPORTANT: Your previous draft was only ${finalized.length} characters. Rewrite 
     finalized.length = finalized.text.length;
   }
 
-  return finalized.text;
+  const signed = finalizeProposalSignature(finalized.text, settings, hardMax);
+  return signed;
 }
 
 function buildProposalPrompt(project, settings, selectedLinks) {
@@ -142,6 +144,11 @@ ${linksBlock}
 - NEVER exceed ${hardMax} characters (Freelancer hard limit ${MAX_PROPOSAL_LENGTH})
 - Count every character including spaces and line breaks
 - Write ${minLen}-${targetMax} characters — not shorter, not longer
+
+## Closing / signature (CRITICAL)
+- Do NOT include any sign-off or closing line
+- Do NOT write "Best regards", "Best,", "Sincerely", "[Your Name]", or "Your Name"
+- Do NOT include the freelancer's name at the end — the system adds "Best regards, {name}" automatically
 
 ## Output
 Return ONLY the final bid proposal text. No markdown, no headings, no "Here is your proposal", no explanations.`;

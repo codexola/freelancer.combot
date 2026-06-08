@@ -35,6 +35,7 @@ import {
 } from '../lib/filters.js';
 import {
   finalizeProposal,
+  finalizeProposalSignature,
   getPortfolioLinks,
   selectRelevantLinks,
   MAX_PROPOSAL_LENGTH
@@ -199,19 +200,6 @@ function pickProfileIdFromList(profiles, profileName) {
   return picked?.id || picked?.profile_id || null;
 }
 
-function appendNameToProposal(proposal, settings) {
-  const name = settings.fullName?.trim();
-  if (!name || !proposal) return proposal || '';
-  if (proposal.toLowerCase().includes(name.toLowerCase())) {
-    return proposal.slice(0, 1500);
-  }
-  const closing = `\n\nBest regards,\n${name}`;
-  if (proposal.length + closing.length <= 1500) {
-    return proposal + closing;
-  }
-  return proposal.slice(0, Math.max(0, 1500 - closing.length)) + closing;
-}
-
 async function syncFreelancerSession(tabId) {
   const settings = await getSettings();
   const res = await chrome.tabs.sendMessage(tabId, { type: 'GET_FREELANCER_SESSION' }).catch(() => null);
@@ -354,16 +342,98 @@ async function enrichProjectViaMonitor(project) {
   return res?.project ? { ...project, ...res.project } : project;
 }
 
+function hasFreelancerOAuth(settings) {
+  return !!(settings?.freelancerOAuthToken || '').trim();
+}
+
+function shouldTryApiBid(settings) {
+  return settings.preferApiBidding !== false && hasFreelancerOAuth(settings);
+}
+
 async function tryApiBidViaMonitor(project, bidData, settings) {
   if (!monitorTabId || settings.preferApiBidding === false) {
-    return { success: false, error: 'api_disabled' };
+    return { success: false, error: 'api_disabled', needsBrowser: true };
+  }
+  if (!hasFreelancerOAuth(settings)) {
+    return { success: false, error: 'oauth_token_missing', needsBrowser: true, useBrowser: true };
   }
   return chrome.tabs.sendMessage(monitorTabId, {
     type: 'API_PLACE_BID',
     project,
     bidData,
     settings
-  }).catch(() => ({ success: false, error: 'api_message_failed' }));
+  }).catch(() => ({ success: false, error: 'api_message_failed', needsBrowser: true }));
+}
+
+async function tryApiBidWithRetries(project, projectData, bidData, settings) {
+  let activeSettings = settings;
+  let activeProjectData = projectData;
+  let result = await tryApiBidViaMonitor(activeProjectData, bidData, activeSettings);
+
+  if (!result?.success && result?.error === 'bidder_id_unavailable' && monitorTabId) {
+    await syncFreelancerSession(monitorTabId);
+    activeSettings = await getSettings();
+    result = await tryApiBidViaMonitor(activeProjectData, bidData, activeSettings);
+  }
+  if (!result?.success && result?.error === 'numeric_project_id_missing') {
+    activeProjectData = await enrichProjectViaMonitor(activeProjectData);
+    result = await tryApiBidViaMonitor(activeProjectData, bidData, activeSettings);
+  }
+
+  return { result, projectData: activeProjectData, settings: activeSettings };
+}
+
+async function runBrowserBid(project, projectData, bidData, settings, bidPageUrl, slowMode) {
+  const tabId = await ensureBidWorkerTab(bidPageUrl);
+  const scriptTimeout = slowMode ? 50000 : OCTO_CONTENT_SCRIPT_MS;
+  const scriptReady = await ensureBidContentScript(tabId, scriptTimeout);
+
+  if (!scriptReady) {
+    return {
+      failed: true,
+      tabId,
+      result: { success: false, error: 'content_script_timeout' },
+      projectData,
+      message: 'ページ読込が遅いため入札フォームに接続できませんでした'
+    };
+  }
+
+  const pageDataRes = await chrome.tabs.sendMessage(tabId, { type: 'GET_PROJECT_DATA' }).catch(() => null);
+  let mergedProjectData = { ...projectData, ...(pageDataRes || {}) };
+
+  const pageFilter = evaluateProjectFilters(mergedProjectData, settings);
+  if (!pageFilter.pass) {
+    return {
+      failed: true,
+      skipped: true,
+      tabId,
+      projectData: mergedProjectData,
+      filter: pageFilter
+    };
+  }
+
+  let result = await chrome.tabs
+    .sendMessage(tabId, { type: 'EXECUTE_BID', bidData, settings })
+    .catch(() => ({ success: false, error: 'content script通信失敗' }));
+
+  if (!result?.success && (result?.needsDocumentSign || result?.error?.includes('署名'))) {
+    if (settings.autoSignDocuments !== false) {
+      result = await handleDocumentSigning(tabId, settings, result, bidData);
+    } else {
+      result = { success: false, skipped: true, error: '書類署名が必要（自動署名オフ）' };
+    }
+  }
+
+  if (!result?.success && slowMode) {
+    const solveResult = await attemptProblemSolve(tabId, project, result, settings);
+    if (solveResult?.resolved) {
+      result = await chrome.tabs
+        .sendMessage(tabId, { type: 'EXECUTE_BID', bidData, settings })
+        .catch(() => result);
+    }
+  }
+
+  return { tabId, result, projectData: mergedProjectData };
 }
 
 async function skipProject(project, reason, message, settings) {
@@ -665,7 +735,10 @@ async function executeBidFlow(project, initialSettings) {
         projectId: project.projectId
       });
     }
-    await recordFilterStatus(project, 'bidding', { message: '入札処理中（API優先・ブラウザ不要）' });
+    const bidModeLabel = shouldTryApiBid(settings)
+      ? 'API → ブラウザ自動切替'
+      : 'ブラウザ（OAuth未設定）';
+    await recordFilterStatus(project, 'bidding', { message: `入札処理中（${bidModeLabel}）` });
 
     let projectData = await enrichProjectViaMonitor(project);
     const preFilter = evaluateProjectFilters(projectData, settings);
@@ -703,7 +776,6 @@ async function executeBidFlow(project, initialSettings) {
 
     try {
       proposal = await generateProposal(settings, projectData);
-      proposal = appendNameToProposal(proposal, settings);
       await saveBidRecord({
         projectId: project.projectId,
         title: project.title,
@@ -734,58 +806,61 @@ async function executeBidFlow(project, initialSettings) {
     };
 
     let result = null;
-    if (settings.preferApiBidding !== false) {
-      result = await tryApiBidViaMonitor(projectData, bidData, settings);
-      if (!result?.success && result?.error === 'bidder_id_unavailable' && monitorTabId) {
-        await syncFreelancerSession(monitorTabId);
-        settings = await getSettings();
-        result = await tryApiBidViaMonitor(projectData, bidData, settings);
+    let bidMethod = 'browser';
+
+    if (shouldTryApiBid(settings)) {
+      bidMethod = 'api';
+      const apiAttempt = await tryApiBidWithRetries(project, projectData, bidData, settings);
+      result = apiAttempt.result;
+      projectData = apiAttempt.projectData;
+      settings = apiAttempt.settings;
+
+      if (result?.success) {
+        await addBidLog({
+          level: 'info',
+          message: 'API入札成功',
+          projectId: project.projectId
+        });
+      } else {
+        await addBidLog({
+          level: 'warn',
+          message: `API入札失敗 → ブラウザ入札に自動切替: ${result?.error || 'unknown'}`,
+          projectId: project.projectId
+        });
+        bidMethod = 'browser';
       }
-      if (!result?.success && result?.error === 'numeric_project_id_missing') {
-        projectData = await enrichProjectViaMonitor(projectData);
-        result = await tryApiBidViaMonitor(projectData, bidData, settings);
-      }
-    } else {
-      result = { success: false, error: 'api_disabled' };
+    } else if (!hasFreelancerOAuth(settings) && settings.preferApiBidding !== false) {
+      await addBidLog({
+        level: 'info',
+        message: 'OAuth未設定 — ブラウザ入札を自動使用',
+        projectId: project.projectId
+      });
     }
 
-    const needsBrowser =
-      result?.needsBrowser ||
-      projectData.isNda ||
-      projectData.requiresDocument ||
-      /document_signing_required|nda|sealed|document|sign|agreement|intellectual property/i.test(
-        String(result?.error || '')
+    if (!result?.success) {
+      const browserOutcome = await runBrowserBid(
+        project,
+        projectData,
+        bidData,
+        settings,
+        bidPageUrl,
+        slowMode
       );
+      tabId = browserOutcome.tabId;
 
-    const apiOnly = settings.apiOnlyBidding !== false && settings.preferApiBidding !== false;
-
-    if (!result?.success && apiOnly && !needsBrowser) {
-      await recordFilterStatus(project, 'failed', {
-        reason: result?.error || 'api_bid_failed',
-        message: `API入札失敗（ブラウザ未使用）: ${result?.error || 'unknown'}`
-      });
-      await recordBidAttempt({
-        success: false,
-        projectId: project.projectId,
-        title: project.title,
-        url: bidPageUrl,
-        proposal,
-        message: `API入札失敗: ${result?.error || 'unknown'}`,
-        level: 'error'
-      });
-      await markProjectProcessed(project.projectId, 'failed');
-      return;
-    }
-
-    if (!result?.success && (needsBrowser || settings.preferApiBidding === false)) {
-      tabId = await ensureBidWorkerTab(bidPageUrl);
-
-      const scriptTimeout = slowMode ? 50000 : OCTO_CONTENT_SCRIPT_MS;
-      const scriptReady = await ensureBidContentScript(tabId, scriptTimeout);
-      if (!scriptReady) {
+      if (browserOutcome.failed) {
+        if (browserOutcome.skipped && browserOutcome.filter) {
+          await skipProject(
+            project,
+            browserOutcome.filter.reason,
+            browserOutcome.filter.message || browserOutcome.filter.reason,
+            settings
+          );
+          return;
+        }
         await recordFilterStatus(project, 'failed', {
           reason: 'content_script_timeout',
-          message: 'ページ読込が遅いため入札フォームに接続できませんでした'
+          message: browserOutcome.message || 'ブラウザ入札に接続できませんでした'
         });
         await recordBidAttempt({
           success: false,
@@ -793,50 +868,17 @@ async function executeBidFlow(project, initialSettings) {
           title: project.title,
           url: bidPageUrl,
           proposal,
-          message: 'content script通信失敗（タイムアウト）',
+          message: browserOutcome.message || 'content script通信失敗（タイムアウト）',
           level: 'error'
         });
         await markProjectProcessed(project.projectId, 'failed');
         return;
       }
 
-      const pageDataRes = await chrome.tabs.sendMessage(tabId, { type: 'GET_PROJECT_DATA' }).catch(() => null);
-      projectData = { ...projectData, ...(pageDataRes || {}) };
-
-      const pageFilter = evaluateProjectFilters(projectData, settings);
-      if (!pageFilter.pass) {
-        await skipProject(
-          project,
-          pageFilter.reason,
-          pageFilter.message || pageFilter.reason,
-          settings
-        );
-        return;
-      }
-
-      result = await chrome.tabs.sendMessage(tabId, {
-        type: 'EXECUTE_BID',
-        bidData,
-        settings
-      }).catch(() => ({ success: false, error: 'content script通信失敗' }));
-
-      if (!result?.success && (result?.needsDocumentSign || result?.error?.includes('署名'))) {
-        if (settings.autoSignDocuments !== false) {
-          result = await handleDocumentSigning(tabId, settings, result, bidData);
-        } else {
-          result = { success: false, skipped: true, error: '書類署名が必要（自動署名オフ）' };
-        }
-      }
-
-      if (!result?.success && slowMode) {
-        const solveResult = await attemptProblemSolve(tabId, project, result, settings);
-        if (solveResult?.resolved) {
-          result = await chrome.tabs.sendMessage(tabId, {
-            type: 'EXECUTE_BID',
-            bidData,
-            settings
-          }).catch(() => result);
-        }
+      result = browserOutcome.result;
+      projectData = browserOutcome.projectData;
+      if (result?.success) {
+        bidMethod = 'browser';
       }
     }
 
@@ -860,7 +902,7 @@ async function executeBidFlow(project, initialSettings) {
       proposal,
       bidCount: project.bidCount,
       elapsedMs: elapsed,
-      message: result?.message || result?.error || result?.reason || '完了',
+      message: `${bidMethod === 'api' ? '[API] ' : '[Browser] '}${result?.message || result?.error || result?.reason || '完了'}`,
       level: result?.success ? 'success' : result?.skipped ? 'warn' : 'error'
     });
 
@@ -965,27 +1007,21 @@ function buildFallbackProposal(project, settings) {
 
 I have extensive experience with ${(project.skills || []).slice(0, 5).join(', ')} and can deliver high-quality results within your budget and timeline.
 
-I'd love to discuss your requirements in more detail. Looking forward to working with you!
-
-Best regards`,
+I'd love to discuss your requirements in more detail. Looking forward to working with you!`,
     Spanish: `Hola, estoy muy interesado en su proyecto "${project.title}".
 
 Tengo amplia experiencia en ${(project.skills || []).slice(0, 5).join(', ')} y puedo entregar resultados de alta calidad dentro de su presupuesto y plazo.
 
-Me encantaría discutir sus requisitos con más detalle. ¡Espero trabajar con usted!
-
-Saludos cordiales`,
+Me encantaría discutir sus requisitos con más detalle. ¡Espero trabajar con usted!`,
     French: `Bonjour, je suis très intéressé par votre projet "${project.title}".
 
 J'ai une vaste expérience en ${(project.skills || []).slice(0, 5).join(', ')} et je peux livrer des résultats de haute qualité dans votre budget et délais.
 
-J'aimerais discuter de vos exigences plus en détail. Au plaisir de travailler avec vous!
-
-Cordialement`
+J'aimerais discuter de vos exigences plus en détail. Au plaisir de travailler avec vous!`
   };
   const baseText = templates[lang] || templates.English;
   const result = finalizeProposal(`${baseText}${linkBlock}`, project, settings, links);
-  return result.text || result;
+  return finalizeProposalSignature(result.text || result, settings, MAX_PROPOSAL_LENGTH);
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {

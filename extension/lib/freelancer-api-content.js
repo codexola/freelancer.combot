@@ -186,16 +186,34 @@
     }
 
     const oauthToken = (settings.freelancerOAuthToken || '').trim();
-    const authHeaders = oauthToken ? { 'freelancer-oauth-v1': oauthToken } : {};
+    if (!oauthToken) {
+      return {
+        success: false,
+        error: 'oauth_token_missing',
+        needsBrowser: true,
+        useBrowser: true
+      };
+    }
+
+    const authHeaders = {};
+    if (oauthToken) {
+      authHeaders['freelancer-oauth-v1'] = oauthToken;
+      if (!oauthToken.startsWith('oauth2_')) {
+        authHeaders.Authorization = `Bearer ${oauthToken}`;
+      }
+    }
 
     let bidderId = settings.freelancerUserId || null;
     let profileId = settings.freelancerProfileId || null;
+    if (!bidderId && global.FabFreelancerSession?.parseUserId) {
+      bidderId = global.FabFreelancerSession.parseUserId();
+    }
     const selfInfo = await fetchSelfInfo(oauthToken);
     if (!bidderId && selfInfo?.userId) bidderId = selfInfo.userId;
     if (!profileId && selfInfo?.profiles?.length) {
       profileId = pickProfileId(selfInfo.profiles, settings.profileName);
     }
-    if (!bidderId) return { success: false, error: 'bidder_id_unavailable', needsBrowser: false };
+    if (!bidderId) return { success: false, error: 'bidder_id_unavailable', needsBrowser: true };
 
     const isHourly = (resolved.bidType || bidData.bidType) === 'hourly';
     const payload = {
@@ -223,11 +241,18 @@
     }
 
     const errMsg = data?.message || data?.error_code || `API bid failed (${status})`;
-    const errStr = String(errMsg);
-    if (/nda|sealed|document|sign|agreement|intellectual property|not_authenticated|login/i.test(errStr)) {
-      return { success: false, needsBrowser: true, error: errMsg };
+    const errCode = String(data?.error_code || '');
+    const errStr = `${errCode} ${errMsg} ${status}`;
+    const needsBrowserFallback =
+      status === 401 ||
+      status === 403 ||
+      /NOT_AUTHENTICATED|UNAUTHORIZED|FORBIDDEN|LOGIN|NDA|SEALED|DOCUMENT|SIGN|AGREEMENT|INTELLECTUAL/i.test(
+        errStr
+      );
+    if (needsBrowserFallback) {
+      return { success: false, needsBrowser: true, error: errMsg, status };
     }
-    return { success: false, needsBrowser: false, error: errMsg };
+    return { success: false, needsBrowser: true, error: errMsg, status };
   }
 
   global.FabFreelancerApi = {

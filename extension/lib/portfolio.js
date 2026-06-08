@@ -206,6 +206,77 @@ export function finalizeProposal(proposalText, project, settings, selectedLinks)
   };
 }
 
+const PLACEHOLDER_SIGNOFF_PATTERNS = [
+  /\n*\s*best\s*,\s*\[?\s*your\s+name\s*\]?\s*\.?\s*$/gi,
+  /\n*\s*best\s+regards\s*,\s*\[?\s*your\s+name\s*\]?\s*\.?\s*$/gi,
+  /\n*\s*best\s*,\s*your\s+name\s*\.?\s*$/gi,
+  /\n*\s*best\s+regards\s*,\s*your\s+name\s*\.?\s*$/gi,
+  /\n*\s*regards\s*,\s*\[?\s*your\s+name\s*\]?\s*\.?\s*$/gi,
+  /\n*\s*sincerely\s*,\s*\[?\s*your\s+name\s*\]?\s*\.?\s*$/gi,
+  /\n*\s*kind\s+regards\s*,\s*\[?\s*your\s+name\s*\]?\s*\.?\s*$/gi,
+  /\n*\s*best\s*,\s*$/gi,
+  /\n*\s*best\s+regards\s*,\s*$/gi
+];
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+export function stripPlaceholderSignoffs(text) {
+  if (!text) return '';
+  let result = text.trimEnd();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const pattern of PLACEHOLDER_SIGNOFF_PATTERNS) {
+      const next = result.replace(pattern, '').trimEnd();
+      if (next !== result) {
+        result = next;
+        changed = true;
+      }
+    }
+  }
+  return result;
+}
+
+export function finalizeProposalSignature(proposal, settings, maxLen = MAX_PROPOSAL_LENGTH) {
+  const name = settings?.fullName?.trim();
+  let text = stripPlaceholderSignoffs(proposal || '');
+
+  if (!name) {
+    return enforceProposalLimit(text, maxLen);
+  }
+
+  const namePatterns = [
+    new RegExp(`\\n*\\s*best\\s*,\\s*${escapeRegExp(name)}\\s*\\.?\\s*$`, 'i'),
+    new RegExp(`\\n*\\s*best\\s+regards\\s*,\\s*${escapeRegExp(name)}\\s*\\.?\\s*$`, 'i'),
+    new RegExp(`\\n*\\s*sincerely\\s*,\\s*${escapeRegExp(name)}\\s*\\.?\\s*$`, 'i'),
+    new RegExp(`\\n*\\s*regards\\s*,\\s*${escapeRegExp(name)}\\s*\\.?\\s*$`, 'i')
+  ];
+
+  for (const pattern of namePatterns) {
+    text = text.replace(pattern, '').trimEnd();
+  }
+
+  const closing = `\n\nBest regards,\n${name}`;
+  if (/\n\s*best\s+regards\s*,\s*$/i.test(text)) {
+    text = text.replace(/\n\s*best\s+regards\s*,\s*$/i, '').trimEnd();
+  }
+
+  if (text.toLowerCase().endsWith(name.toLowerCase())) {
+    const beforeName = text.slice(0, -name.length).trimEnd();
+    if (/best\s+regards\s*,?\s*$/i.test(beforeName)) {
+      return enforceProposalLimit(text, maxLen);
+    }
+  }
+
+  if (text.length + closing.length <= maxLen) {
+    return text + closing;
+  }
+  const trimmed = text.slice(0, Math.max(0, maxLen - closing.length)).trimEnd();
+  return trimmed + closing;
+}
+
 export function buildProjectAnalysisSummary(project) {
   const skills = (project.skills || []).join(', ');
   const parts = [

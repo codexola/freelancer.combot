@@ -279,6 +279,7 @@ function renderBidRecords() {
 function openProposalModal(record) {
   const modal = $('proposalModal');
   if (!modal) return;
+  modal.removeAttribute('inert');
   $('modalTitle').textContent = record.title || '入札文';
   $('modalMeta').textContent = [
     formatTime(record.timestamp),
@@ -301,8 +302,13 @@ function openProposalModal(record) {
 function closeProposalModal() {
   const modal = $('proposalModal');
   if (!modal) return;
+  const focused = document.activeElement;
+  if (focused && modal.contains(focused)) {
+    focused.blur();
+  }
   modal.classList.add('hidden');
   modal.setAttribute('aria-hidden', 'true');
+  modal.setAttribute('inert', '');
 }
 
 function formatTime(iso) {

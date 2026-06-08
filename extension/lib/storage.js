@@ -23,6 +23,7 @@ export const DEFAULT_SETTINGS = {
   fullAddress: '',
   freelancerProfileId: null,
   apiOnlyBidding: true,
+  autoBidMethodSwitch: true,
   signatureStrokes: [],
   portfolioLinks: [],
   portfolioLinksText: '',
