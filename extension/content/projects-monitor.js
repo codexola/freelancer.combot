@@ -3,13 +3,21 @@
  * 新規プロジェクトを検出しバックグラウンドに通知
  */
 
-import {
-  parseProjectHref,
-  normalizeDetailsUrl,
-  compareProjectsByNewest
-} from '../lib/project-url.js';
+(function () {
+  'use strict';
 
-const RECENT_PROJECTS_API =
+  if (window.__fabProjectsMonitorLoaded) return;
+  window.__fabProjectsMonitorLoaded = true;
+
+  const { parseProjectHref, normalizeDetailsUrl, compareProjectsByNewest } =
+    window.FabProjectUrl || {};
+
+  if (!parseProjectHref) {
+    console.error('[fab] FabProjectUrl helpers missing — monitor cannot run');
+    return;
+  }
+
+  const RECENT_PROJECTS_API =
   'https://www.freelancer.com/ajax-api/navigation/recent-projects-and-contests.php?limit=50&compact=true&new_errors=true&new_pools=true';
 
 let isMonitoring = false;
@@ -221,9 +229,49 @@ function extractProjectFromCard(card) {
   };
 }
 
+function scanProjectsFromLinks() {
+  const seen = new Set();
+  const projects = [];
+
+  for (const link of document.querySelectorAll('a[href*="/projects/"], a[href*="/contest/"]')) {
+    const href = link.getAttribute('href') || '';
+    const parsed = parseProjectHref(href);
+    if (!parsed || seen.has(parsed.projectId)) continue;
+
+    const rawTitle = (link.textContent || '').trim().split('\n')[0].trim();
+    if (!rawTitle || rawTitle.length < 5 || /^bid\s*now$/i.test(rawTitle)) continue;
+
+    seen.add(parsed.projectId);
+    projects.push({
+      projectId: parsed.projectId,
+      url: parsed.url,
+      title: rawTitle,
+      bidCount: null,
+      secondsAgo: null,
+      isListedOld: false,
+      budget: '',
+      budgetMinUsd: 0,
+      description: '',
+      skills: [],
+      isNda: false,
+      isUrgent: false,
+      clientCountry: '',
+      bidType: 'fixed',
+      detectedAt: Date.now(),
+      source: 'dom-link'
+    });
+  }
+
+  return projects;
+}
+
 function scanProjects() {
   const cards = getProjectCards();
-  return cards.map(extractProjectFromCard).filter((p) => p && p.projectId && p.title);
+  let projects = cards.map(extractProjectFromCard).filter((p) => p && p.projectId && p.title);
+  if (!projects.length) {
+    projects = scanProjectsFromLinks();
+  }
+  return projects;
 }
 
 function normalizeApiProject(item) {
@@ -355,9 +403,20 @@ function notifyScanResult(stats) {
     .catch(() => {});
 }
 
+function notifyMonitorError(error) {
+  chrome.runtime
+    .sendMessage({
+      type: 'MONITOR_ERROR',
+      message: String(error?.message || error),
+      pageUrl: window.location.href
+    })
+    .catch(() => {});
+}
+
 async function runScan() {
   if (!isMonitoring) return;
 
+  try {
   const domProjects = scanProjects();
   const apiProjects = await fetchRecentProjectsFromApi().catch(() => []);
   const projects = mergeProjects(apiProjects, domProjects).sort(compareProjectsByNewest);
@@ -393,6 +452,9 @@ async function runScan() {
   if (newProjects.length) {
     newProjects.sort(compareProjectsByNewest);
     notifyNewProjects(newProjects);
+  }
+  } catch (err) {
+    notifyMonitorError(err);
   }
 }
 
@@ -448,7 +510,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   return true;
 });
 
-chrome.runtime.sendMessage({ type: 'CONTENT_SCRIPT_READY', page: 'projects-monitor' }).catch(() => {});
+chrome.runtime
+  .sendMessage({ type: 'CONTENT_SCRIPT_READY', page: 'projects-monitor' })
+  .catch(() => {});
 
 chrome.storage.local.get(['settings'], (result) => {
   if (result.settings?.isRunning) startMonitoring();
@@ -458,3 +522,5 @@ chrome.storage.onChanged.addListener((changes) => {
   if (changes.settings?.newValue?.isRunning) startMonitoring();
   else if (changes.settings?.newValue?.isRunning === false) stopMonitoring();
 });
+
+})();

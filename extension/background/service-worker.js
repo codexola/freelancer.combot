@@ -45,6 +45,83 @@ let isProcessingBid = false;
 const pendingYoungProjects = new Map();
 let pendingRetryTimer = null;
 let lastScanLog = { at: 0, signature: '' };
+const MONITOR_SCRIPT_FILES = ['lib/project-url-content.js', 'content/projects-monitor.js'];
+
+async function injectMonitorScripts(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: MONITOR_SCRIPT_FILES
+  });
+}
+
+async function ensureContentScript(tabId) {
+  let ready = await waitForContentScript(tabId, 6000);
+  if (ready) return true;
+
+  await addFilterStatusEntry({
+    status: 'system',
+    level: 'warn',
+    title: 'SYSTEM',
+    message: 'Monitor script not responding — injecting...'
+  });
+
+  try {
+    await injectMonitorScripts(tabId);
+  } catch (err) {
+    await addFilterStatusEntry({
+      status: 'failed',
+      level: 'error',
+      title: 'SYSTEM',
+      message: `Script injection failed: ${err.message}`
+    });
+    return false;
+  }
+
+  ready = await waitForContentScript(tabId, 12000);
+  if (!ready) {
+    await addFilterStatusEntry({
+      status: 'failed',
+      level: 'error',
+      title: 'SYSTEM',
+      message: 'Monitor script failed to start after injection'
+    });
+  }
+  return ready;
+}
+
+async function startMonitoringOnTab(tabId) {
+  const ready = await ensureContentScript(tabId);
+  if (!ready) return false;
+
+  try {
+    const res = await chrome.tabs.sendMessage(tabId, { type: 'START_MONITORING' });
+    if (!res?.ok) {
+      await addFilterStatusEntry({
+        status: 'failed',
+        level: 'error',
+        title: 'SYSTEM',
+        message: 'START_MONITORING returned unexpected response'
+      });
+      return false;
+    }
+    await addFilterStatusEntry({
+      status: 'system',
+      level: 'info',
+      title: 'SYSTEM',
+      message: 'Monitor active — scanning projects'
+    });
+    await chrome.tabs.sendMessage(tabId, { type: 'SCAN_PROJECTS' }).catch(() => {});
+    return true;
+  } catch (err) {
+    await addFilterStatusEntry({
+      status: 'failed',
+      level: 'error',
+      title: 'SYSTEM',
+      message: `START_MONITORING failed: ${err.message}`
+    });
+    return false;
+  }
+}
 
 async function ensureMonitorTab() {
   const tabs = await chrome.tabs.query({ url: 'https://www.freelancer.com/search/projects*' });
@@ -57,14 +134,14 @@ async function ensureMonitorTab() {
     if (!onSearchPage) {
       await chrome.tabs.update(monitorTabId, { url: PROJECTS_URL });
       await waitForTabLoad(monitorTabId);
-      await waitForContentScript(monitorTabId);
     }
+    await ensureContentScript(monitorTabId);
     return monitorTabId;
   }
   const tab = await chrome.tabs.create({ url: PROJECTS_URL, active: false });
   monitorTabId = tab.id;
   await waitForTabLoad(tab.id);
-  await waitForContentScript(tab.id);
+  await ensureContentScript(tab.id);
   return tab.id;
 }
 
@@ -83,21 +160,15 @@ function waitForTabLoad(tabId, timeout = 15000) {
 }
 
 async function startBot() {
-  const settings = await getSettings();
   await saveSettings({ isRunning: true });
-  const tabId = await ensureMonitorTab();
   await addFilterStatusEntry({
     status: 'system',
     level: 'info',
     message: `Bot started — monitoring ${PROJECTS_URL}`,
     title: 'SYSTEM'
   });
-  try {
-    await chrome.tabs.sendMessage(tabId, { type: 'START_MONITORING' });
-  } catch {
-    await sleep(2000);
-    await chrome.tabs.sendMessage(tabId, { type: 'START_MONITORING' }).catch(() => {});
-  }
+  const tabId = await ensureMonitorTab();
+  await startMonitoringOnTab(tabId);
   await addBidLog({ level: 'info', message: '自動入札を開始しました', status: 'started' });
   chrome.alarms.create('poll_projects', { periodInMinutes: 1 });
 }
@@ -629,7 +700,7 @@ Cordialement`
   return finalizeProposal(baseText, project, settings);
 }
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     switch (msg.type) {
       case 'START_BOT':
@@ -699,11 +770,25 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       case 'DELETE_FILTER_STATUS_ENTRY':
         sendResponse({ ok: true, filterStatus: await deleteFilterStatusEntry(msg.entryId) });
         break;
+      case 'MONITOR_ERROR': {
+        await addFilterStatusEntry({
+          status: 'failed',
+          level: 'error',
+          title: 'MONITOR',
+          message: msg.message || 'Monitor scan error'
+        });
+        sendResponse({ ok: true });
+        break;
+      }
       case 'CONTENT_SCRIPT_READY':
         if (msg.page === 'projects-monitor') {
           const s = await getSettings();
-          if (s.isRunning && monitorTabId) {
-            chrome.tabs.sendMessage(monitorTabId, { type: 'START_MONITORING' }).catch(() => {});
+          if (s.isRunning) {
+            const tabId = monitorTabId || sender.tab?.id;
+            if (tabId) {
+              monitorTabId = tabId;
+              await startMonitoringOnTab(tabId).catch(() => {});
+            }
           }
         }
         sendResponse({ ok: true });
