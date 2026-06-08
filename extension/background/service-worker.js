@@ -52,7 +52,9 @@ const OCTO_TAB_LOAD_MS = 30000;
 const OCTO_CONTENT_SCRIPT_MS = 20000;
 let monitorTabId = null;
 const bidQueue = [];
-let isProcessingBid = false;
+const activeBidProjectIds = new Set();
+const projectBidTabs = new Map();
+let activeBidCount = 0;
 const pendingYoungProjects = new Map();
 let pendingRetryTimer = null;
 let lastScanLog = { at: 0, signature: '' };
@@ -63,7 +65,10 @@ const MONITOR_SCRIPT_FILES = [
   'content/projects-monitor.js'
 ];
 const BID_SCRIPT_FILES = ['content/document-signer.js', 'content/bid-handler.js'];
-let bidWorkerTabId = null;
+
+async function isBotRunning() {
+  return (await getSettings()).isRunning;
+}
 
 async function injectMonitorScripts(tabId) {
   await chrome.scripting.executeScript({
@@ -281,10 +286,29 @@ async function startBot() {
 async function stopBot() {
   await saveSettings({ isRunning: false });
   chrome.alarms.clear('poll_projects');
+  bidQueue.length = 0;
+
+  if (pendingRetryTimer) {
+    clearTimeout(pendingRetryTimer);
+    pendingRetryTimer = null;
+  }
+  pendingYoungProjects.clear();
+
   if (monitorTabId) {
     chrome.tabs.sendMessage(monitorTabId, { type: 'STOP_MONITORING' }).catch(() => {});
   }
-  await addBidLog({ level: 'info', message: '自動入札を停止しました', status: 'stopped' });
+
+  await addFilterStatusEntry({
+    status: 'system',
+    level: 'info',
+    title: 'SYSTEM',
+    message: '自動フィルタリング・自動入札を停止しました'
+  });
+  await addBidLog({
+    level: 'info',
+    message: '自動フィルタリング・自動入札を停止しました',
+    status: 'stopped'
+  });
 }
 
 function sleep(ms) {
@@ -384,7 +408,16 @@ async function tryApiBidWithRetries(project, projectData, bidData, settings) {
 }
 
 async function runBrowserBid(project, projectData, bidData, settings, bidPageUrl, slowMode) {
-  const tabId = await ensureBidWorkerTab(bidPageUrl);
+  if (!(await isBotRunning())) {
+    return {
+      failed: true,
+      result: { success: false, skipped: true, error: 'stopped' },
+      projectData,
+      message: '停止中のため入札を中断しました'
+    };
+  }
+
+  const tabId = await openProjectBidTab(bidPageUrl, project.projectId);
   const scriptTimeout = slowMode ? 50000 : OCTO_CONTENT_SCRIPT_MS;
   const scriptReady = await ensureBidContentScript(tabId, scriptTimeout);
 
@@ -412,9 +445,20 @@ async function runBrowserBid(project, projectData, bidData, settings, bidPageUrl
     };
   }
 
-  let result = await chrome.tabs
-    .sendMessage(tabId, { type: 'EXECUTE_BID', bidData, settings })
-    .catch(() => ({ success: false, error: 'content script通信失敗' }));
+  let result = null;
+  const maxBidAttempts = slowMode ? 3 : 2;
+  for (let attempt = 1; attempt <= maxBidAttempts; attempt++) {
+    result = await chrome.tabs
+      .sendMessage(tabId, { type: 'EXECUTE_BID', bidData, settings })
+      .catch(() => ({ success: false, error: 'content script通信失敗' }));
+
+    if (result?.success) break;
+    if (result?.needsDocumentSign || result?.error?.includes('署名')) break;
+    if (attempt < maxBidAttempts) {
+      await sleep(3000);
+      await ensureBidContentScript(tabId, scriptTimeout);
+    }
+  }
 
   if (!result?.success && (result?.needsDocumentSign || result?.error?.includes('署名'))) {
     if (settings.autoSignDocuments !== false) {
@@ -518,17 +562,20 @@ function schedulePendingRetries() {
       }
     }
 
-    for (const item of ready) {
-      await markProjectProcessed(item.project.projectId, 'deferred');
-      await processProjectThroughPipeline(item.project, item.settings, { isNew: false });
-    }
+    if (await isBotRunning()) {
+      for (const item of ready) {
+        await markProjectProcessed(item.project.projectId, 'deferred');
+        await processProjectThroughPipeline(item.project, item.settings, { isNew: false });
+      }
 
-    await processBidQueue();
+      void processBidQueue();
+    }
     schedulePendingRetries();
   }, delay);
 }
 
 async function enqueueProject(project, settings) {
+  if (!(await isBotRunning())) return false;
   if (await isProjectInFlight(project.projectId)) return false;
 
   const graceSec = settings.bidExecutionGraceSec ?? 180;
@@ -550,9 +597,11 @@ async function enqueueProject(project, settings) {
     status: 'queued',
     bidCount: project.bidCount
   });
+  const parallelNote =
+    activeBidCount > 0 ? ` — 並列入札（他 ${activeBidCount}件処理中）` : '';
   await addBidLog({
     level: 'info',
-    message: `新規プロジェクト検出: ${project.title} (${project.bidCount ?? '?'} bids)`,
+    message: `新規プロジェクト検出: ${project.title} (${project.bidCount ?? '?'} bids)${parallelNote}`,
     projectId: project.projectId
   });
   return true;
@@ -571,6 +620,10 @@ async function archiveProjectResult(project, status, details = {}) {
 }
 
 async function processProjectThroughPipeline(project, settings, { isNew = true } = {}) {
+  if (!(await isBotRunning())) {
+    return { pass: false, reason: 'stopped' };
+  }
+
   const normalized = normalizeProject({ ...project, isNewDetection: isNew });
   const reqPreview = analyzeProjectRequirements(normalized);
 
@@ -674,35 +727,55 @@ async function handleDetectedProjects(projects, { seedBaseline = false } = {}) {
   return { ok: true, queued: bidQueue.length, processed: sorted.length };
 }
 
-async function processBidQueue() {
-  if (isProcessingBid || bidQueue.length === 0) return;
-  isProcessingBid = true;
+function dispatchBidJob(project, settings) {
+  void (async () => {
+    if (!(await isBotRunning())) return;
+    if (activeBidProjectIds.has(project.projectId)) return;
 
-  while (bidQueue.length > 0) {
-    const item = bidQueue.shift();
-    await executeBidFlow(item.project, item.settings);
-  }
-
-  isProcessingBid = false;
+    activeBidProjectIds.add(project.projectId);
+    activeBidCount++;
+    try {
+      await executeBidFlow(project, settings);
+    } finally {
+      activeBidProjectIds.delete(project.projectId);
+      projectBidTabs.delete(project.projectId);
+      activeBidCount--;
+    }
+  })();
 }
 
-async function ensureBidWorkerTab(bidUrl) {
+async function processBidQueue() {
+  if (bidQueue.length === 0) return;
+  if (!(await isBotRunning())) {
+    bidQueue.length = 0;
+    return;
+  }
+
+  const batch = bidQueue.splice(0);
+  for (const item of batch) {
+    dispatchBidJob(item.project, item.settings);
+  }
+}
+
+async function openProjectBidTab(bidUrl, projectId) {
   const loadTimeout = settingsSlowMs();
-  if (bidWorkerTabId) {
+  const existingTabId = projectBidTabs.get(projectId);
+  if (existingTabId) {
     try {
-      const tab = await chrome.tabs.get(bidWorkerTabId);
+      const tab = await chrome.tabs.get(existingTabId);
       if (tab?.id) {
-        await chrome.tabs.update(bidWorkerTabId, { url: bidUrl, active: true });
-        await waitForTabLoad(bidWorkerTabId, loadTimeout);
+        await chrome.tabs.update(existingTabId, { url: bidUrl, active: false });
+        await waitForTabLoad(existingTabId, loadTimeout);
         await sleep(2500);
-        return bidWorkerTabId;
+        return existingTabId;
       }
     } catch {
-      bidWorkerTabId = null;
+      projectBidTabs.delete(projectId);
     }
   }
-  const tab = await chrome.tabs.create({ url: bidUrl, active: true });
-  bidWorkerTabId = tab.id;
+
+  const tab = await chrome.tabs.create({ url: bidUrl, active: false });
+  projectBidTabs.set(projectId, tab.id);
   await waitForTabLoad(tab.id, loadTimeout);
   await sleep(2500);
   return tab.id;
@@ -713,6 +786,8 @@ function settingsSlowMs() {
 }
 
 async function executeBidFlow(project, initialSettings) {
+  if (!(await isBotRunning())) return;
+
   let settings = initialSettings;
   const startTime = Date.now();
   let tabId = null;
@@ -774,6 +849,11 @@ async function executeBidFlow(project, initialSettings) {
       projectData = await enrichProjectViaMonitor({ ...projectData, forceEnrich: true });
     }
 
+    if (!(await isBotRunning())) {
+      await markProjectProcessed(project.projectId, 'stopped');
+      return;
+    }
+
     try {
       proposal = await generateProposal(settings, projectData);
       await saveBidRecord({
@@ -809,6 +889,10 @@ async function executeBidFlow(project, initialSettings) {
     let bidMethod = 'browser';
 
     if (shouldTryApiBid(settings)) {
+      if (!(await isBotRunning())) {
+        await markProjectProcessed(project.projectId, 'stopped');
+        return;
+      }
       bidMethod = 'api';
       const apiAttempt = await tryApiBidWithRetries(project, projectData, bidData, settings);
       result = apiAttempt.result;
@@ -838,6 +922,11 @@ async function executeBidFlow(project, initialSettings) {
     }
 
     if (!result?.success) {
+      if (!(await isBotRunning())) {
+        await markProjectProcessed(project.projectId, 'stopped');
+        return;
+      }
+
       const browserOutcome = await runBrowserBid(
         project,
         projectData,
@@ -930,10 +1019,8 @@ async function executeBidFlow(project, initialSettings) {
     });
     await markProjectProcessed(project.projectId, 'error');
   } finally {
-    if (monitorTabId) {
-      chrome.tabs.sendMessage(monitorTabId, { type: 'SCAN_PROJECTS' }).catch(() => {});
-    }
-    void processBidQueue();
+    activeBidProjectIds.delete(project.projectId);
+    projectBidTabs.delete(project.projectId);
   }
 }
 

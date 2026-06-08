@@ -444,8 +444,10 @@ function notifyMonitorError(error) {
     .catch(() => {});
 }
 
+let scanPaused = false;
+
 async function runScan() {
-  if (!isMonitoring) return;
+  if (!isMonitoring || scanPaused) return;
 
   try {
   const domProjects = scanProjects();
@@ -565,8 +567,19 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   } else if (msg.type === 'STOP_MONITORING') {
     stopMonitoring();
     sendResponse({ ok: true });
+  } else if (msg.type === 'PAUSE_SCAN') {
+    scanPaused = true;
+    sendResponse({ ok: true, scanPaused: true });
+  } else if (msg.type === 'RESUME_SCAN') {
+    scanPaused = false;
+    sendResponse({ ok: true, scanPaused: false });
+    runScan().catch(() => {});
   } else if (msg.type === 'SCAN_PROJECTS') {
-    runScan().then(() => sendResponse({ ok: true })).catch(() => sendResponse({ ok: false }));
+    if (!scanPaused) {
+      runScan().then(() => sendResponse({ ok: true })).catch(() => sendResponse({ ok: false }));
+    } else {
+      sendResponse({ ok: true, skipped: true, reason: 'scan_paused' });
+    }
   } else if (msg.type === 'ENRICH_PROJECT') {
     enrichProject(msg.project).then((project) => sendResponse({ ok: true, project }));
   } else if (msg.type === 'API_PLACE_BID') {

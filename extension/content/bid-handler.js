@@ -44,6 +44,25 @@
     return rect && rect.width > 0 && rect.height > 0;
   }
 
+  function getClickTargets(el) {
+    const seen = new Set();
+    const targets = [];
+    const add = (node) => {
+      if (!node || seen.has(node)) return;
+      seen.add(node);
+      targets.push(node);
+    };
+
+    add(el);
+    add(el.closest?.('fl-button'));
+    add(el.querySelector?.('button, a, [role="button"]'));
+    if (el.shadowRoot) add(el.shadowRoot.querySelector('button, a, [role="button"]'));
+    const flParent = el.closest?.('fl-button');
+    if (flParent?.shadowRoot) add(flParent.shadowRoot.querySelector('button, a, [role="button"]'));
+
+    return targets;
+  }
+
   function clickElement(el) {
     if (!el) return false;
     try {
@@ -51,15 +70,20 @@
     } catch {
       /* ignore */
     }
-    const target = el.closest('fl-button') || el.querySelector('button, a') || el;
-    if (target.disabled) return false;
-    for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
-      target.dispatchEvent(
-        new MouseEvent(type, { bubbles: true, cancelable: true, view: window })
-      );
+
+    const targets = getClickTargets(el);
+    let clicked = false;
+    for (const target of targets) {
+      if (target.disabled || target.getAttribute?.('aria-disabled') === 'true') continue;
+      for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+        target.dispatchEvent(
+          new MouseEvent(type, { bubbles: true, cancelable: true, view: window })
+        );
+      }
+      if (typeof target.click === 'function') target.click();
+      clicked = true;
     }
-    if (typeof target.click === 'function') target.click();
-    return true;
+    return clicked;
   }
 
   async function scrollToBidSection() {
@@ -408,14 +432,19 @@
     return { ok: true };
   }
 
+  function isPlaceBidLabel(text) {
+    if (!text) return false;
+    if (/place a bid on this project|bid on this project|start bidding|write a bid/i.test(text)) {
+      return false;
+    }
+    return /\bplace\s+bid\b/i.test(text) || /\bsubmit\s+bid\b/i.test(text);
+  }
+
   function findPlaceBidButton() {
     const buttons = document.querySelectorAll(
-      'button, fl-button, [role="button"], a, input[type="submit"], [class*="Button"], [class*="btn"]'
+      'fl-button, button, [role="button"], a, input[type="submit"], [class*="Button"], [class*="btn"], [class*="primary"]'
     );
-    const matches = Array.from(buttons).filter((b) => {
-      const text = getElementLabel(b);
-      return /^place\s+bid$/i.test(text) || /^submit\s+bid$/i.test(text);
-    });
+    const matches = Array.from(buttons).filter((b) => isPlaceBidLabel(getElementLabel(b)));
     if (!matches.length) return null;
     matches.sort((a, b) => {
       const ay = a.getBoundingClientRect?.().top || 0;
@@ -425,18 +454,85 @@
     return matches.find(isVisible) || matches[0];
   }
 
-  async function clickPlaceBid() {
+  function detectBidSuccess() {
+    const bodyText = document.body.innerText || '';
+    return /bid placed|successfully placed|your bid has been submitted|bid submitted|you have already bid|bid was placed|入札が完了/i.test(
+      bodyText
+    );
+  }
+
+  function detectBidError() {
+    const errorEl = document.querySelector(
+      '[class*="error"], [class*="Error"], .alert-danger, [role="alert"], fl-alert'
+    );
+    const errorText = errorEl?.textContent?.trim() || '';
+    if (errorText && /error|invalid|required|failed|unable|cannot/i.test(errorText)) {
+      return errorText;
+    }
+    return '';
+  }
+
+  async function waitForBidConfirmation(timeoutMs) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (detectBidSuccess()) {
+        return { success: true, message: '入札完了' };
+      }
+      const errorText = detectBidError();
+      if (errorText) {
+        return { success: false, error: errorText, retry: false };
+      }
+      await sleep(1000);
+    }
+    return { success: false, error: '入札確認タイムアウト', retry: true };
+  }
+
+  async function clickPlaceBidOnce(settings) {
+    const slow = settings?.slowNetworkMode !== false;
+    const clickDelay = slow ? 3500 : 2500;
+
     await scrollToBidSection();
     let btn = findPlaceBidButton();
     if (!btn) {
-      await sleep(1200);
+      await sleep(1500);
       await scrollToBidSection();
       btn = findPlaceBidButton();
     }
     if (!btn) return { success: false, error: 'Place Bidボタンが見つかりません' };
+
     clickElement(btn);
-    await sleep(2800);
+    await sleep(clickDelay);
     return { success: true };
+  }
+
+  async function clickPlaceBidAndConfirm(settings) {
+    const slow = settings?.slowNetworkMode !== false;
+    const maxAttempts = slow ? 8 : 5;
+    const confirmTimeout = slow ? 30000 : 18000;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const clickResult = await clickPlaceBidOnce(settings);
+      if (!clickResult.success) return clickResult;
+
+      const outcome = await waitForBidConfirmation(confirmTimeout);
+      if (outcome.success) return outcome;
+      if (!outcome.retry) return outcome;
+
+      if (!findPlaceBidButton()) break;
+      await sleep(1200);
+    }
+
+    if (detectBidSuccess()) {
+      return { success: true, message: '入札完了' };
+    }
+
+    const stillVisible = !!findPlaceBidButton();
+    return {
+      success: false,
+      error: stillVisible
+        ? 'Place Bidボタンをクリックしても入札が完了しませんでした'
+        : '入札結果を確認できませんでした'
+    };
   }
 
   async function executeBid(bidData, settings) {
@@ -466,40 +562,46 @@
     const fillResult = await fillBidForm({ ...bidData, ...projectData }, settings);
     if (!fillResult.ok) return { success: false, error: fillResult.error };
 
-    const clickResult = await clickPlaceBid();
-    if (!clickResult.success) return clickResult;
+    const slow = settings?.slowNetworkMode !== false;
+    const maxRounds = slow ? 4 : 3;
 
-    await sleep(1200);
-    fillYourNameFields(settings, document);
+    for (let round = 0; round < maxRounds; round++) {
+      const clickResult = await clickPlaceBidOnce(settings);
+      if (!clickResult.success) return { ...clickResult, projectData };
 
-    if (window.__fabDocumentSigner?.isDocumentSigningPage?.()) {
-      const signResult = await window.__fabDocumentSigner.completeDocumentSigning(settings);
-      if (signResult.needed && !signResult.success) {
-        return { success: false, error: signResult.error, needsDocumentSign: true };
+      await sleep(1200);
+      fillYourNameFields(settings, document);
+
+      if (window.__fabDocumentSigner?.isDocumentSigningPage?.()) {
+        const signResult = await window.__fabDocumentSigner.completeDocumentSigning(settings);
+        if (signResult.needed && !signResult.success) {
+          return { success: false, error: signResult.error, needsDocumentSign: true, projectData };
+        }
+        continue;
       }
+
+      const confirmResult = await waitForBidConfirmation(slow ? 30000 : 18000);
+      if (confirmResult.success) {
+        return { success: true, projectData, message: '入札完了' };
+      }
+      if (!confirmResult.retry) {
+        return { ...confirmResult, projectData };
+      }
+
+      if (!findPlaceBidButton()) break;
     }
 
-    await sleep(2000);
+    const finalConfirm = await clickPlaceBidAndConfirm(settings);
+    if (finalConfirm.success) {
+      return { success: true, projectData, message: '入札完了' };
+    }
 
-    const bodyText = document.body.innerText;
-    const successIndicators =
-      /bid placed|successfully placed|your bid has been submitted|bid submitted|入札が完了/i.test(
-        bodyText
-      );
-    const errorEl = document.querySelector(
-      '[class*="error"], [class*="Error"], .alert-danger, [role="alert"], fl-alert'
-    );
-    const errorText = errorEl?.textContent?.trim() || '';
-    const hasError = errorText && /error|invalid|required|failed|unable|cannot/i.test(errorText);
-    const placeBidStillVisible = !!findPlaceBidButton();
-
-    const success = successIndicators || (!hasError && !placeBidStillVisible);
-
+    const errorText = detectBidError() || finalConfirm.error;
     return {
-      success,
+      success: false,
       projectData,
-      message: success ? '入札完了' : hasError ? errorText : '入札結果を確認できませんでした',
-      error: success ? undefined : hasError ? errorText : '入札結果を確認できませんでした'
+      message: errorText || '入札結果を確認できませんでした',
+      error: errorText || '入札結果を確認できませんでした'
     };
   }
 

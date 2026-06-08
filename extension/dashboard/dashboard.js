@@ -379,7 +379,7 @@ function setupEventListeners() {
     await sendMessage('STOP_BOT');
     currentSettings.isRunning = false;
     updateStatusBadge();
-    showSaveStatus('自動入札を停止しました');
+    showSaveStatus('自動フィルタリング・自動入札を停止しました');
   });
 
   $('btnSave').addEventListener('click', () => saveSettings(true));
