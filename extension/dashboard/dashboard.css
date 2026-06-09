@@ -90,6 +90,11 @@ body {
   font-size: 1.75rem;
   font-weight: 700;
   color: var(--primary);
+  transition: color 0.2s ease;
+}
+
+.stat-value.stat-pulse {
+  color: var(--success, #22c55e);
 }
 
 .stat-label {

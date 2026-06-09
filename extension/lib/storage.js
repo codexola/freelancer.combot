@@ -66,6 +66,9 @@ export const DEFAULT_SETTINGS = {
 };
 
 export const DEFAULT_STATS = {
+  totalProjectsDetected: 0,
+  todayProjectsDetected: 0,
+  projectsTodayDate: '',
   totalBids: 0,
   todayBids: 0,
   todayDate: '',
@@ -77,6 +80,40 @@ export const DEFAULT_STATS = {
   bidRecords: [],
   recentLogs: []
 };
+
+const PROJECT_DETECTION_KEY = 'projectDetectionRegistry';
+const MAX_DETECTION_REGISTRY = 10000;
+
+function todayDateString() {
+  return new Date().toDateString();
+}
+
+async function getProjectDetectionRegistry() {
+  const result = await chrome.storage.local.get([PROJECT_DETECTION_KEY]);
+  return result[PROJECT_DETECTION_KEY] || {};
+}
+
+async function saveProjectDetectionRegistry(registry) {
+  await chrome.storage.local.set({ [PROJECT_DETECTION_KEY]: registry });
+}
+
+function resetDailyProjectStats(stats) {
+  const today = todayDateString();
+  if (stats.projectsTodayDate !== today) {
+    stats.todayProjectsDetected = 0;
+    stats.projectsTodayDate = today;
+  }
+  return stats;
+}
+
+function resetDailyBidStats(stats) {
+  const today = todayDateString();
+  if (stats.todayDate !== today) {
+    stats.todayBids = 0;
+    stats.todayDate = today;
+  }
+  return stats;
+}
 
 export async function getSettings() {
   const result = await chrome.storage.local.get(['settings']);
@@ -97,11 +134,23 @@ export async function saveSettings(partial) {
 
 export async function getStats() {
   const result = await chrome.storage.local.get(['stats']);
-  const stats = { ...DEFAULT_STATS, ...result.stats };
-  const today = new Date().toDateString();
-  if (stats.todayDate !== today) {
-    stats.todayBids = 0;
-    stats.todayDate = today;
+  let stats = { ...DEFAULT_STATS, ...result.stats };
+  const before = JSON.stringify({
+    todayBids: stats.todayBids,
+    todayProjectsDetected: stats.todayProjectsDetected
+  });
+  stats = resetDailyBidStats(stats);
+  stats = resetDailyProjectStats(stats);
+  const after = JSON.stringify({
+    todayBids: stats.todayBids,
+    todayProjectsDetected: stats.todayProjectsDetected
+  });
+  const registry = await getProjectDetectionRegistry();
+  const registryCount = Object.keys(registry).length;
+  if (registryCount > (stats.totalProjectsDetected || 0)) {
+    stats.totalProjectsDetected = registryCount;
+    await chrome.storage.local.set({ stats });
+  } else if (before !== after) {
     await chrome.storage.local.set({ stats });
   }
   return stats;
@@ -160,13 +209,36 @@ export async function saveBidRecord(entry) {
   return record;
 }
 
+export async function recordProjectsDetected(projects, { seedBaseline = false } = {}) {
+  if (!projects?.length) return await getStats();
+
+  const stats = await getStats();
+  const registry = await getProjectDetectionRegistry();
+  const now = Date.now();
+  let addedToday = 0;
+
+  for (const project of projects) {
+    const id = String(project.projectId || project.numericProjectId || '').trim();
+    if (!id || registry[id]) continue;
+    registry[id] = { at: now, seeded: !!seedBaseline };
+    if (!seedBaseline) addedToday++;
+  }
+
+  const keys = Object.keys(registry);
+  if (keys.length > MAX_DETECTION_REGISTRY) {
+    const sorted = keys.sort((a, b) => (registry[a].at || 0) - (registry[b].at || 0));
+    sorted.slice(0, keys.length - MAX_DETECTION_REGISTRY).forEach((k) => delete registry[k]);
+  }
+
+  stats.totalProjectsDetected = Object.keys(registry).length;
+  stats.todayProjectsDetected += addedToday;
+  await saveProjectDetectionRegistry(registry);
+  return saveStats(stats);
+}
+
 export async function recordBidAttempt(result) {
   const stats = await getStats();
-  const today = new Date().toDateString();
-  if (stats.todayDate !== today) {
-    stats.todayBids = 0;
-    stats.todayDate = today;
-  }
+  resetDailyBidStats(stats);
   if (!result.skipped) {
     stats.totalBids++;
     stats.todayBids++;
@@ -197,6 +269,7 @@ export async function deleteSettings() {
 
 export async function deleteStats() {
   await chrome.storage.local.set({ stats: { ...DEFAULT_STATS } });
+  await chrome.storage.local.remove([PROJECT_DETECTION_KEY]);
 }
 
 export async function getProcessedProjects() {

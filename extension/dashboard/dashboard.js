@@ -260,16 +260,23 @@ function escAttr(str) {
     .replace(/</g, '&lt;');
 }
 
-function renderStats() {
-  $('statTotalBids').textContent = currentStats.totalBids || 0;
-  $('statTodayBids').textContent = currentStats.todayBids || 0;
-  $('statSuccess').textContent = currentStats.successfulBids || 0;
-  $('statFailed').textContent = currentStats.failedBids || 0;
-  $('statSkipped').textContent = currentStats.skippedBids || 0;
-  $('statLastBid').textContent = currentStats.lastBidAt
-    ? new Date(currentStats.lastBidAt).toLocaleTimeString('ja-JP')
-    : '-';
+function setStatValue(id, value) {
+  const el = $(id);
+  if (!el) return;
+  const next = String(value ?? 0);
+  if (el.textContent !== next) {
+    el.textContent = next;
+    el.classList.remove('stat-pulse');
+    void el.offsetWidth;
+    el.classList.add('stat-pulse');
+  }
+}
 
+function renderStats() {
+  setStatValue('statTotalProjects', currentStats.totalProjectsDetected || 0);
+  setStatValue('statTodayProjects', currentStats.todayProjectsDetected || 0);
+  setStatValue('statTotalBids', currentStats.totalBids || 0);
+  setStatValue('statTodayBids', currentStats.todayBids || 0);
   renderBidRecords();
 }
 
@@ -506,8 +513,16 @@ chrome.storage.onChanged.addListener((changes, area) => {
   }
 });
 
+async function refreshStatsLive() {
+  if (document.hidden) return;
+  currentStats = await sendMessage('GET_STATS');
+  renderStats();
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
   setupTabs();
   setupEventListeners();
   await loadAll();
+  setInterval(refreshStatsLive, 2000);
+  document.addEventListener('visibilitychange', refreshStatsLive);
 });

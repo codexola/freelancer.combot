@@ -8,6 +8,7 @@ import {
   saveSettings,
   getStats,
   recordBidAttempt,
+  recordProjectsDetected,
   saveBidRecord,
   markProjectProcessed,
   getProcessedProjects,
@@ -798,6 +799,7 @@ async function handleDetectedProjects(projects, { seedBaseline = false } = {}) {
       });
       await markProjectProcessed(project.projectId, 'seeded');
     }
+    await recordProjectsDetected(sorted, { seedBaseline: true });
     await addFilterStatusEntry({
       status: 'scan',
       level: 'info',
@@ -806,6 +808,8 @@ async function handleDetectedProjects(projects, { seedBaseline = false } = {}) {
     });
     return { ok: true, seeded: sorted.length };
   }
+
+  await recordProjectsDetected(projects, { seedBaseline: false });
 
   const fresh = [];
   for (const project of sorted) {
