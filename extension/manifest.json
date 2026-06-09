@@ -36,13 +36,23 @@
   },
   "content_scripts": [
     {
+      "matches": ["https://www.freelancer.com/*"],
+      "js": ["lib/oauth-capture-content.js"],
+      "run_at": "document_start"
+    },
+    {
       "matches": ["https://www.freelancer.com/search/projects*"],
       "js": ["lib/project-url-content.js", "lib/freelancer-api-content.js", "lib/freelancer-session-content.js", "content/projects-monitor.js"],
       "run_at": "document_idle"
     },
     {
       "matches": ["https://www.freelancer.com/projects/*"],
-      "js": ["content/bid-handler.js", "content/document-signer.js"],
+      "js": [
+        "lib/project-url-content.js",
+        "lib/freelancer-session-content.js",
+        "content/bid-handler.js",
+        "content/document-signer.js"
+      ],
       "run_at": "document_idle"
     }
   ],

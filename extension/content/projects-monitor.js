@@ -611,6 +611,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       }
     }
     sendResponse({ ok: true, session });
+  } else if (msg.type === 'SCAN_OAUTH_TOKEN') {
+    window.FabOAuthCapture?.scanStorageForOAuthToken?.();
+    sendResponse({ ok: true });
   } else if (msg.type === 'GET_MONITOR_STATUS') {
     sendResponse({ isMonitoring, seenCount: seenProjectIds.size, viewedNumeric: seenNumericIds.size });
   } else if (msg.type === 'PING') {

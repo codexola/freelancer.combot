@@ -59,6 +59,7 @@
 
         <div class="tabs">
           <button class="tab active" data-tab="api">API</button>
+          <button class="tab" data-tab="account">アカウント</button>
           <button class="tab" data-tab="bid">入札</button>
           <button class="tab" data-tab="profile">プロフィール</button>
           <button class="tab" data-tab="portfolio">ポートフォリオ</button>
@@ -105,6 +106,41 @@
             </div>
           </div>
           <p class="hint">入札文は1000〜1400文字を目標とし、1500文字を超えません。API必須（Claude または OpenAI）。</p>
+        </div>
+
+        <div class="tab-content" id="tab-account">
+          <p class="hint">Octo Browser プロファイルで <strong>freelancer.com</strong> にログインしてください。パスワードは保存せず、ブラウザのログインセッションから OAuth と入札フォーム状態を自動取得します。</p>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Freelancer メール（識別用）</label>
+              <input type="email" id="freelancerEmail" placeholder="you@example.com">
+            </div>
+            <div class="form-group">
+              <label>Freelancer ユーザー名（識別用）</label>
+              <input type="text" id="freelancerUsername" placeholder="Robert Iuoras">
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Freelancer OAuth トークン</label>
+            <input type="password" id="freelancerOAuthToken" placeholder="ログイン後に自動取得、または手動入力">
+            <p class="hint" id="oauthStatusHint">未同期 — 「セッション同期」を実行してください</p>
+          </div>
+          <div class="form-group">
+            <label>
+              <input type="checkbox" id="autoCaptureOAuth" checked>
+              ブラウザセッションから OAuth を自動取得
+            </label>
+          </div>
+          <div class="form-group">
+            <label>
+              <input type="checkbox" id="sessionApiBidding" checked>
+              セッション Cookie で API 入札を試行（OAuth なしでも高速入札）
+            </label>
+          </div>
+          <div class="panel-actions" style="margin-top: 0.5rem;">
+            <button type="button" class="btn btn-primary btn-sm" id="btnSyncSession">セッション同期</button>
+          </div>
+          <p class="hint">同期内容: ユーザー ID、閲覧済みプロジェクト（フィルター）、searchServiceFilters、lastUsedForms、OAuth トークン</p>
         </div>
 
         <div class="tab-content" id="tab-bid">
@@ -163,20 +199,16 @@
           <div class="form-group">
             <label>
               <input type="checkbox" id="preferApiBidding" checked>
-              API入札を優先（OAuth設定時のみ。未設定時は自動でブラウザ入札）
+              API入札を優先（セッション/OAuth → 失敗時ブラウザ入札）
             </label>
           </div>
           <div class="form-group">
             <label>
               <input type="checkbox" id="apiOnlyBidding" checked>
-              OAuth設定時はAPIを先に試行（失敗時はブラウザに自動切替）
+              APIを先に試行（失敗時はブラウザに自動切替）
             </label>
           </div>
-          <div class="form-group">
-            <label>Freelancer OAuth トークン（任意）</label>
-            <input type="password" id="freelancerOAuthToken" placeholder="未設定時はブラウザ入札を自動使用">
-            <p class="hint">OAuthがなくても入札できます。設定がある場合のみAPI入札を試行し、失敗時はブラウザに切り替わります。</p>
-          </div>
+          <p class="hint">アカウント設定は「アカウント」タブで管理します。</p>
         </div>
 
         <div class="tab-content" id="tab-profile">

@@ -473,6 +473,42 @@
     return langEl?.textContent?.trim() || '';
   }
 
+  function getNumericProjectId() {
+    const parsed = window.FabProjectUrl?.parseProjectHref?.(window.location.href);
+    if (parsed?.numericProjectId) return parsed.numericProjectId;
+    const scripts = document.querySelectorAll('script[type="application/json"], script');
+    for (const script of scripts) {
+      const text = script.textContent || '';
+      const match = text.match(/"project_id"\s*:\s*(\d{6,})/) || text.match(/"id"\s*:\s*(\d{6,})/);
+      if (match) return Number(match[1]);
+    }
+    return null;
+  }
+
+  function applyLastUsedFormDefaults(bidData, settings) {
+    const session = window.FabFreelancerSession;
+    if (!session?.getBidFormForProject) return bidData;
+    const numericId = bidData.numericProjectId || getNumericProjectId();
+    if (!numericId) return bidData;
+    const stored = session.getBidFormForProject(numericId, settings?.freelancerUserId);
+    if (!stored?.bid) return { ...bidData, numericProjectId: numericId };
+    return {
+      ...bidData,
+      numericProjectId: numericId,
+      bidAmount: bidData.bidAmount || Number(stored.bid.bidAmount) || settings.defaultBidAmount,
+      hourlyRate: bidData.hourlyRate || Number(stored.bid.bidAmount) || settings.defaultHourlyRate,
+      deliveryDays: bidData.deliveryDays || Number(stored.bid.period) || settings.defaultDeliveryDays
+    };
+  }
+
+  function syncBidFormStorage(bidData, settings) {
+    const session = window.FabFreelancerSession;
+    if (!session?.updateBidFormForProject) return;
+    const numericId = bidData.numericProjectId || getNumericProjectId();
+    if (!numericId) return;
+    session.updateBidFormForProject(numericId, bidData, settings, settings?.freelancerUserId);
+  }
+
   function getProjectData() {
     const title =
       document.querySelector('h1, [class*="project-title"], [class*="ProjectTitle"]')?.textContent?.trim() ||
@@ -500,6 +536,7 @@
       skills,
       bidType: bidType === 'hourly' ? 'hourly' : 'fixed',
       bidCount: getBidCount(),
+      numericProjectId: getNumericProjectId(),
       clientCountry: extractClientCountry(),
       projectLanguage: extractProjectLanguage(),
       languageText: extractProjectLanguage(),
@@ -952,12 +989,17 @@
       };
     }
 
-    const mergedBidData = {
-      ...bidData,
-      ...projectData,
-      bidType: projectData.bidType || bidData.bidType
-    };
+    const mergedBidData = applyLastUsedFormDefaults(
+      {
+        ...bidData,
+        ...projectData,
+        bidType: projectData.bidType || bidData.bidType
+      },
+      settings
+    );
+    syncBidFormStorage(mergedBidData, settings);
     const fillResult = await fillBidForm(mergedBidData, settings);
+    syncBidFormStorage(mergedBidData, settings);
     if (!fillResult.ok) {
       if (findPlaceBidButton() && findProposalInput() && mergedBidData.proposal) {
         const proposalOnly = findProposalInput();

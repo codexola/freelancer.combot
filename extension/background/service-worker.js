@@ -239,6 +239,9 @@ async function syncFreelancerSession(tabId) {
   if (profileId) {
     settingsPatch.freelancerProfileId = Number(profileId);
   }
+  if (infoRes?.info?.displayName && !settings.freelancerUsername) {
+    settingsPatch.freelancerUsername = infoRes.info.displayName;
+  }
 
   if (session?.searchFilters?.projectLanguages?.length) {
     settingsPatch.languages = session.searchFilters.projectLanguages;
@@ -267,12 +270,18 @@ async function syncFreelancerSession(tabId) {
     seeded++;
   }
 
+  if (settings.autoCaptureOAuth !== false) {
+    await captureOAuthFromMonitorTab();
+  }
+
   if (userId || seeded) {
+    const latest = await getSettings();
+    const oauthNote = hasFreelancerOAuth(latest) ? 'oauth:yes' : 'oauth:no';
     await addFilterStatusEntry({
       status: 'system',
       level: 'info',
       title: 'SESSION',
-      message: `Freelancer session: user ${userId || '?'} | viewed ${seeded} projects | langs ${(searchFilters?.projectLanguages || []).join(',') || '-'}`
+      message: `Freelancer session: user ${userId || '?'} | viewed ${seeded} | forms ${session?.lastUsedFormCount ?? 0} | ${oauthNote} | langs ${(searchFilters?.projectLanguages || []).join(',') || '-'}`
     });
   }
 
@@ -423,15 +432,15 @@ function hasFreelancerOAuth(settings) {
 }
 
 function shouldTryApiBid(settings) {
-  return settings.preferApiBidding !== false && hasFreelancerOAuth(settings);
+  if (settings.preferApiBidding === false) return false;
+  if (hasFreelancerOAuth(settings)) return true;
+  if (settings.sessionApiBidding !== false) return true;
+  return !!settings.freelancerUserId;
 }
 
 async function tryApiBidViaMonitor(project, bidData, settings) {
   if (!monitorTabId || settings.preferApiBidding === false) {
     return { success: false, error: 'api_disabled', needsBrowser: true };
-  }
-  if (!hasFreelancerOAuth(settings)) {
-    return { success: false, error: 'oauth_token_missing', needsBrowser: true, useBrowser: true };
   }
   return chrome.tabs.sendMessage(monitorTabId, {
     type: 'API_PLACE_BID',
@@ -439,6 +448,14 @@ async function tryApiBidViaMonitor(project, bidData, settings) {
     bidData,
     settings
   }).catch(() => ({ success: false, error: 'api_message_failed', needsBrowser: true }));
+}
+
+async function captureOAuthFromMonitorTab() {
+  if (!monitorTabId) return null;
+  await chrome.tabs
+    .sendMessage(monitorTabId, { type: 'SCAN_OAUTH_TOKEN' })
+    .catch(() => null);
+  return getSettings();
 }
 
 async function tryApiBidWithRetries(project, projectData, bidData, settings) {
@@ -904,8 +921,10 @@ async function executeBidFlow(project, initialSettings) {
       });
     }
     const bidModeLabel = shouldTryApiBid(settings)
-      ? 'API → ブラウザ自動切替'
-      : 'ブラウザ（OAuth未設定）';
+      ? hasFreelancerOAuth(settings)
+        ? 'API(OAuth) → ブラウザ'
+        : 'API(セッション) → ブラウザ'
+      : 'ブラウザ';
     await recordFilterStatus(project, 'bidding', {
       message: `入札処理中（順次・${bidModeLabel}）— 完了まで次のプロジェクトは保留`
     });
@@ -1016,10 +1035,10 @@ async function executeBidFlow(project, initialSettings) {
         });
         bidMethod = 'browser';
       }
-    } else if (!hasFreelancerOAuth(settings) && settings.preferApiBidding !== false) {
+    } else if (!shouldTryApiBid(settings) && settings.preferApiBidding !== false) {
       await addBidLog({
         level: 'info',
-        message: 'OAuth未設定 — ブラウザ入札を自動使用',
+        message: 'API入札無効 — ブラウザ入札を自動使用',
         projectId: project.projectId
       });
     }
@@ -1345,6 +1364,47 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         sendResponse({ ok: true });
         break;
+      case 'OAUTH_TOKEN_CAPTURED': {
+        const token = String(msg.token || '').trim();
+        if (token) {
+          const current = await getSettings();
+          if (current.freelancerOAuthToken !== token) {
+            await saveSettings({
+              freelancerOAuthToken: token,
+              freelancerOAuthCapturedAt: new Date().toISOString()
+            });
+            await addFilterStatusEntry({
+              status: 'system',
+              level: 'info',
+              title: 'OAUTH',
+              message: 'Freelancer OAuth token captured from browser session'
+            });
+          }
+        }
+        sendResponse({ ok: true });
+        break;
+      }
+      case 'SYNC_FREELANCER_SESSION': {
+        const tabId = monitorTabId || (await ensureMonitorTab().catch(() => null));
+        if (!tabId) {
+          sendResponse({ ok: false, error: 'monitor_tab_unavailable' });
+          break;
+        }
+        monitorTabId = tabId;
+        const session = await syncFreelancerSession(tabId);
+        const updated = await getSettings();
+        sendResponse({
+          ok: true,
+          session,
+          settings: {
+            freelancerUserId: updated.freelancerUserId,
+            freelancerProfileId: updated.freelancerProfileId,
+            freelancerOAuthToken: updated.freelancerOAuthToken ? '***' : '',
+            freelancerOAuthCapturedAt: updated.freelancerOAuthCapturedAt
+          }
+        });
+        break;
+      }
       default:
         sendResponse({ error: 'unknown_message' });
     }

@@ -53,7 +53,7 @@ function renderSettings() {
     'proposalPrompt', 'proposalMinLength', 'proposalMaxLength',
     'defaultBidAmount', 'defaultDeliveryDays', 'defaultHourlyRate', 'profileName',
     'pollIntervalMs', 'bidWindowMinSec', 'bidWindowMaxSec', 'bidExecutionGraceSec', 'maxBidCount',
-    'freelancerOAuthToken',
+    'freelancerEmail', 'freelancerUsername', 'freelancerOAuthToken',
     'fullName', 'fullAddress', 'minPriceUsd', 'maxBudget', 'languages'
   ];
   fields.forEach((f) => {
@@ -69,6 +69,13 @@ function renderSettings() {
   if ($('apiOnlyBidding')) {
     $('apiOnlyBidding').checked = currentSettings.apiOnlyBidding !== false;
   }
+  if ($('autoCaptureOAuth')) {
+    $('autoCaptureOAuth').checked = currentSettings.autoCaptureOAuth !== false;
+  }
+  if ($('sessionApiBidding')) {
+    $('sessionApiBidding').checked = currentSettings.sessionApiBidding !== false;
+  }
+  updateOAuthStatusHint();
   $('skipUnknownCountry').checked = currentSettings.skipUnknownCountry !== false;
   $('excludedCategoriesInfo').value =
     'マーケティング, 成人コンテンツ, 仮想秘書 (採用・VA・パーソナルアシスタント)';
@@ -111,6 +118,22 @@ function parseExcludedCountries(text) {
   return parseListField(text);
 }
 
+function updateOAuthStatusHint() {
+  const hint = $('oauthStatusHint');
+  if (!hint) return;
+  const userId = currentSettings.freelancerUserId;
+  const hasOAuth = !!(currentSettings.freelancerOAuthToken || '').trim();
+  const capturedAt = currentSettings.freelancerOAuthCapturedAt;
+  const parts = [];
+  if (userId) parts.push(`User ID: ${userId}`);
+  if (hasOAuth) {
+    parts.push(capturedAt ? `OAuth: 取得済 (${new Date(capturedAt).toLocaleString('ja-JP')})` : 'OAuth: 設定済');
+  } else {
+    parts.push('OAuth: 未取得');
+  }
+  hint.textContent = parts.join(' | ');
+}
+
 function collectSettings() {
   const projectTypes = [];
   if ($('typeFixed').checked) projectTypes.push('fixed');
@@ -141,7 +164,11 @@ function collectSettings() {
     slowNetworkMode: $('slowNetworkMode').checked,
     preferApiBidding: $('preferApiBidding').checked,
     apiOnlyBidding: $('apiOnlyBidding')?.checked !== false,
+    autoCaptureOAuth: $('autoCaptureOAuth')?.checked !== false,
+    sessionApiBidding: $('sessionApiBidding')?.checked !== false,
     skipUnknownCountry: $('skipUnknownCountry').checked,
+    freelancerEmail: $('freelancerEmail')?.value || '',
+    freelancerUsername: $('freelancerUsername')?.value || '',
     freelancerOAuthToken: $('freelancerOAuthToken').value,
     fullName: $('fullName').value,
     fullAddress: $('fullAddress').value,
@@ -411,6 +438,20 @@ function setupEventListeners() {
     if (e.key === 'Escape') closeProposalModal();
   });
 
+  $('btnSyncSession')?.addEventListener('click', async () => {
+    if (isDirty) await saveSettings(true);
+    showSaveStatus('Freelancer セッションを同期中...');
+    const res = await sendMessage('SYNC_FREELANCER_SESSION');
+    if (res?.ok) {
+      await loadAll();
+      showSaveStatus(
+        `セッション同期完了 — User ${res.settings?.freelancerUserId || '?'} | OAuth ${res.settings?.freelancerOAuthToken ? 'OK' : '未取得'}`
+      );
+    } else {
+      showSaveStatus(`セッション同期失敗: ${res?.error || 'monitor tab unavailable'}`);
+    }
+  });
+
   $('btnClearFilterStatus').addEventListener('click', async () => {
     if (!confirm('フィルタリングコンソールをクリアしますか？')) return;
     await sendMessage('CLEAR_FILTER_STATUS');
@@ -425,7 +466,7 @@ function setupEventListeners() {
   });
 
   const watchFields = document.querySelectorAll(
-    'input, select, textarea, #autoSignDocuments, #skipNdaProjects, #slowNetworkMode, #preferApiBidding, #apiOnlyBidding, #skipUnknownCountry, #typeFixed, #typeHourly'
+    'input, select, textarea, #autoSignDocuments, #skipNdaProjects, #slowNetworkMode, #preferApiBidding, #apiOnlyBidding, #autoCaptureOAuth, #sessionApiBidding, #skipUnknownCountry, #typeFixed, #typeHourly'
   );
   watchFields.forEach((el) => {
     el.addEventListener('input', onSettingsChange);
@@ -437,6 +478,7 @@ chrome.runtime.onMessage.addListener((msg) => {
   if (msg.type === 'SETTINGS_UPDATED') {
     currentSettings = msg.settings;
     updateStatusBadge();
+    updateOAuthStatusHint();
   }
   if (msg.type === 'STATS_UPDATED') {
     currentStats = msg.stats;

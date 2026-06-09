@@ -170,6 +170,36 @@
     return details ? { ...project, ...details } : project;
   }
 
+  function buildAuthHeaders(oauthToken) {
+    const token = String(oauthToken || '').trim();
+    if (!token) return {};
+    const headers = { 'freelancer-oauth-v1': token };
+    if (!token.startsWith('oauth2_')) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+    return headers;
+  }
+
+  function extractApiError(data, status) {
+    return (
+      data?.error?.detail ||
+      data?.error?.code ||
+      data?.message ||
+      data?.error_code ||
+      `API bid failed (${status})`
+    );
+  }
+
+  function shouldFallbackToBrowser(status, errStr) {
+    return (
+      status === 401 ||
+      status === 403 ||
+      /NOT_AUTHENTICATED|UNAUTHORIZED|FORBIDDEN|LOGIN|NDA|SEALED|DOCUMENT|SIGN|AGREEMENT|INTELLECTUAL/i.test(
+        errStr
+      )
+    );
+  }
+
   async function placeBidViaApi(project, bidData, settings) {
     let resolved = await resolveProjectForBid(project);
     const numericId = resolved.numericProjectId || resolved.numericId;
@@ -186,73 +216,94 @@
     }
 
     const oauthToken = (settings.freelancerOAuthToken || '').trim();
-    if (!oauthToken) {
-      return {
-        success: false,
-        error: 'oauth_token_missing',
-        needsBrowser: true,
-        useBrowser: true
-      };
-    }
-
-    const authHeaders = {};
-    if (oauthToken) {
-      authHeaders['freelancer-oauth-v1'] = oauthToken;
-      if (!oauthToken.startsWith('oauth2_')) {
-        authHeaders.Authorization = `Bearer ${oauthToken}`;
-      }
-    }
-
     let bidderId = settings.freelancerUserId || null;
     let profileId = settings.freelancerProfileId || null;
     if (!bidderId && global.FabFreelancerSession?.parseUserId) {
       bidderId = global.FabFreelancerSession.parseUserId();
     }
+
     const selfInfo = await fetchSelfInfo(oauthToken);
     if (!bidderId && selfInfo?.userId) bidderId = selfInfo.userId;
     if (!profileId && selfInfo?.profiles?.length) {
       profileId = pickProfileId(selfInfo.profiles, settings.profileName);
     }
+    if (!bidderId) {
+      const sessionSelf = await fetchSelfInfo('');
+      if (sessionSelf?.userId) bidderId = sessionSelf.userId;
+      if (!profileId && sessionSelf?.profiles?.length) {
+        profileId = pickProfileId(sessionSelf.profiles, settings.profileName);
+      }
+    }
     if (!bidderId) return { success: false, error: 'bidder_id_unavailable', needsBrowser: true };
 
+    const storedForm = global.FabFreelancerSession?.getBidFormForProject?.(numericId, bidderId);
     const isHourly = (resolved.bidType || bidData.bidType) === 'hourly';
     const payload = {
       project_id: Number(numericId),
       bidder_id: Number(bidderId),
-      description: String(bidData.proposal || '').slice(0, 1500),
+      description: String(
+        bidData.proposal || storedForm?.proposal?.proposal || ''
+      ).slice(0, 1500),
       milestone_percentage: 100
     };
     if (profileId) payload.profile_id = Number(profileId);
     if (isHourly) {
-      payload.amount = Number(bidData.hourlyRate || settings.defaultHourlyRate);
-    } else {
-      payload.amount = Number(bidData.bidAmount || settings.defaultBidAmount);
-      payload.period = Number(bidData.deliveryDays || settings.defaultDeliveryDays);
-    }
-
-    const { ok, status, data } = await fetchWithSession(`${API_BASE}/projects/0.1/bids/`, {
-      method: 'POST',
-      headers: authHeaders,
-      body: JSON.stringify(payload)
-    });
-
-    if (ok && (data?.status === 'success' || data?.result)) {
-      return { success: true, message: 'API入札完了', viaApi: true, numericProjectId: numericId };
-    }
-
-    const errMsg = data?.message || data?.error_code || `API bid failed (${status})`;
-    const errCode = String(data?.error_code || '');
-    const errStr = `${errCode} ${errMsg} ${status}`;
-    const needsBrowserFallback =
-      status === 401 ||
-      status === 403 ||
-      /NOT_AUTHENTICATED|UNAUTHORIZED|FORBIDDEN|LOGIN|NDA|SEALED|DOCUMENT|SIGN|AGREEMENT|INTELLECTUAL/i.test(
-        errStr
+      payload.amount = Number(
+        bidData.hourlyRate ||
+          storedForm?.bid?.bidAmount ||
+          settings.defaultHourlyRate
       );
-    if (needsBrowserFallback) {
-      return { success: false, needsBrowser: true, error: errMsg, status };
+    } else {
+      payload.amount = Number(
+        bidData.bidAmount || storedForm?.bid?.bidAmount || settings.defaultBidAmount
+      );
+      payload.period = Number(
+        bidData.deliveryDays || storedForm?.bid?.period || settings.defaultDeliveryDays
+      );
     }
-    return { success: false, needsBrowser: true, error: errMsg, status };
+
+    const attempts = [];
+    if (settings.sessionApiBidding !== false) {
+      attempts.push({ label: 'session', headers: {} });
+    }
+    if (oauthToken) {
+      attempts.push({ label: 'oauth', headers: buildAuthHeaders(oauthToken) });
+    }
+    if (!attempts.length) {
+      attempts.push({ label: 'session', headers: {} });
+    }
+
+    let lastError = 'api_bid_failed';
+    let lastStatus = 0;
+    for (const attempt of attempts) {
+      const { ok, status, data } = await fetchWithSession(`${API_BASE}/projects/0.1/bids/`, {
+        method: 'POST',
+        headers: attempt.headers,
+        body: JSON.stringify(payload)
+      });
+
+      if (ok && (data?.status === 'success' || data?.result)) {
+        return {
+          success: true,
+          message: `API入札完了 (${attempt.label})`,
+          viaApi: true,
+          numericProjectId: numericId,
+          authMode: attempt.label
+        };
+      }
+
+      const errMsg = extractApiError(data, status);
+      const errCode = String(data?.error?.code || data?.error_code || '');
+      const errStr = `${errCode} ${errMsg} ${status}`;
+      lastError = errMsg;
+      lastStatus = status;
+
+      if (!shouldFallbackToBrowser(status, errStr) && attempt === attempts[attempts.length - 1]) {
+        return { success: false, needsBrowser: true, error: errMsg, status };
+      }
+    }
+
+    return { success: false, needsBrowser: true, error: lastError, status: lastStatus };
   }
 
   global.FabFreelancerApi = {
