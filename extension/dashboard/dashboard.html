@@ -130,8 +130,13 @@
           </div>
           <div class="form-row">
             <div class="form-group">
+              <label>スキャン間隔（ミリ秒）</label>
+              <input type="number" id="pollIntervalMs" min="300" max="10000" value="500">
+              <p class="hint">新規プロジェクト検出の頻度（500ms推奨）</p>
+            </div>
+            <div class="form-group">
               <label>入札時間窓 最小（秒）</label>
-              <input type="number" id="bidWindowMinSec" min="1" max="60">
+              <input type="number" id="bidWindowMinSec" min="0" max="60" value="0">
             </div>
             <div class="form-group">
               <label>入札時間窓 最大（秒）</label>
@@ -151,8 +156,8 @@
           </div>
           <div class="form-group">
             <label>
-              <input type="checkbox" id="slowNetworkMode" checked>
-              遅い回線モード（ページ読込・API入札のタイムアウトを延長）
+              <input type="checkbox" id="slowNetworkMode">
+              遅い回線モード（ページ読込・API入札のタイムアウトを延長。高速入札時はオフ推奨）
             </label>
           </div>
           <div class="form-group">

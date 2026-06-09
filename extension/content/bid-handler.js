@@ -378,7 +378,7 @@
   }
 
   async function prepareBidPage(settings, maxMs) {
-    const timeout = maxMs || (settings.slowNetworkMode !== false ? 50000 : 20000);
+    const timeout = maxMs || (settings.slowNetworkMode !== false ? 50000 : 10000);
     const start = Date.now();
 
     while (Date.now() - start < timeout) {

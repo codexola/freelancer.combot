@@ -367,8 +367,49 @@ function normalizeProject(project) {
   return {
     ...project,
     url: url || project.url,
+    detectedAt: project.detectedAt || Date.now(),
     isNewDetection: project.isNewDetection !== false
   };
+}
+
+function isSlowNetwork(settings) {
+  return settings?.slowNetworkMode !== false;
+}
+
+function tabLoadTimeoutMs(settings) {
+  return isSlowNetwork(settings) ? OCTO_TAB_LOAD_MS : 12000;
+}
+
+function tabSettleMs(settings) {
+  return isSlowNetwork(settings) ? 2500 : 600;
+}
+
+function projectNeedsEnrichment(project, settings) {
+  const needsCountry = settings.skipUnknownCountry !== false && !project.clientCountry;
+  return !project.numericProjectId || needsCountry;
+}
+
+async function filterWithOptionalEnrich(project, settings) {
+  let candidate = project;
+  let result = await filterProject(candidate, settings);
+
+  if (result.pass || !projectNeedsEnrichment(candidate, settings)) {
+    return { candidate, result };
+  }
+
+  const enrichReasons = ['country_unknown', 'age_unknown'];
+  const shouldEnrich =
+    enrichReasons.includes(result.reason) ||
+    !candidate.numericProjectId ||
+    (settings.skipUnknownCountry !== false && !candidate.clientCountry);
+
+  if (!shouldEnrich) {
+    return { candidate, result };
+  }
+
+  candidate = await enrichProjectViaMonitor(candidate);
+  result = await filterProject(candidate, settings);
+  return { candidate, result };
 }
 
 async function enrichProjectViaMonitor(project) {
@@ -428,8 +469,8 @@ async function runBrowserBid(project, projectData, bidData, settings, bidPageUrl
     };
   }
 
-  const tabId = await openProjectBidTab(bidPageUrl, project.projectId);
-  const scriptTimeout = slowMode ? 50000 : OCTO_CONTENT_SCRIPT_MS;
+  const tabId = await openProjectBidTab(bidPageUrl, project.projectId, settings);
+  const scriptTimeout = slowMode ? 50000 : 12000;
   const scriptReady = await ensureBidContentScript(tabId, scriptTimeout);
 
   if (!scriptReady) {
@@ -482,7 +523,7 @@ async function runBrowserBid(project, projectData, bidData, settings, bidPageUrl
   const maxBidAttempts = slowMode ? 3 : 2;
   for (let attempt = 1; attempt <= maxBidAttempts; attempt++) {
     await chrome.tabs.update(tabId, { active: true }).catch(() => {});
-    await sleep(1200);
+    await sleep(slowMode ? 1200 : 400);
 
     result = await chrome.tabs
       .sendMessage(tabId, { type: 'EXECUTE_BID', bidData: activeBidData, settings })
@@ -491,7 +532,7 @@ async function runBrowserBid(project, projectData, bidData, settings, bidPageUrl
     if (result?.success) break;
     if (result?.needsDocumentSign || result?.error?.includes('署名')) break;
     if (attempt < maxBidAttempts) {
-      await sleep(3000);
+      await sleep(slowMode ? 3000 : 1000);
       await ensureBidContentScript(tabId, scriptTimeout);
     }
   }
@@ -673,20 +714,8 @@ async function processProjectThroughPipeline(project, settings, { isNew = true }
     });
   }
 
-  let candidate = normalized;
-  const needsEnrichment =
-    !candidate.clientCountry ||
-    !candidate.description ||
-    !candidate.numericProjectId ||
-    settings.skipUnknownCountry !== false;
-  if (needsEnrichment) {
-    candidate = await enrichProjectViaMonitor(candidate);
-  }
-
-  const { pass, reason, message, defer, retryInMs, requirementAnalysis } = await filterProject(
-    candidate,
-    settings
-  );
+  const { candidate, result: filterOutcome } = await filterWithOptionalEnrich(normalized, settings);
+  const { pass, reason, message, defer, retryInMs, requirementAnalysis } = filterOutcome;
   const reqMsg = requirementAnalysis?.summary || reqPreview.summary;
   let archiveStatus = reason || 'skipped';
 
@@ -761,17 +790,19 @@ async function handleDetectedProjects(projects, { seedBaseline = false } = {}) {
     return { ok: true, seeded: sorted.length };
   }
 
-  let queued = 0;
+  const fresh = [];
   for (const project of sorted) {
     const archived =
       (await isProjectArchived(project.projectId)) ||
       (project.numericProjectId != null &&
         (await isProjectArchived(String(project.numericProjectId))));
-    if (archived) continue;
-
-    const result = await processProjectThroughPipeline(project, settings, { isNew: true });
-    if (result.pass) queued++;
+    if (!archived) fresh.push(project);
   }
+
+  const results = await Promise.all(
+    fresh.map((project) => processProjectThroughPipeline(project, settings, { isNew: true }))
+  );
+  const queued = results.filter((r) => r.pass).length;
 
   void processBidQueue();
   return { ok: true, queued: bidQueue.length, processed: sorted.length };
@@ -820,16 +851,17 @@ async function closeProjectBidTab(tabId, projectId) {
   await chrome.tabs.remove(tabId).catch(() => {});
 }
 
-async function openProjectBidTab(bidUrl, projectId) {
-  const loadTimeout = settingsSlowMs();
+async function openProjectBidTab(bidUrl, projectId, settings) {
+  const loadTimeout = tabLoadTimeoutMs(settings);
+  const settleMs = tabSettleMs(settings);
   const existingTabId = projectBidTabs.get(projectId);
   if (existingTabId) {
     try {
       const tab = await chrome.tabs.get(existingTabId);
       if (tab?.id) {
-        await chrome.tabs.update(existingTabId, { url: bidUrl, active: false });
+        await chrome.tabs.update(existingTabId, { url: bidUrl, active: true });
         await waitForTabLoad(existingTabId, loadTimeout);
-        await sleep(2500);
+        await sleep(settleMs);
         return existingTabId;
       }
     } catch {
@@ -837,15 +869,11 @@ async function openProjectBidTab(bidUrl, projectId) {
     }
   }
 
-  const tab = await chrome.tabs.create({ url: bidUrl, active: false });
+  const tab = await chrome.tabs.create({ url: bidUrl, active: true });
   projectBidTabs.set(projectId, tab.id);
   await waitForTabLoad(tab.id, loadTimeout);
-  await sleep(2500);
+  await sleep(settleMs);
   return tab.id;
-}
-
-function settingsSlowMs() {
-  return 45000;
 }
 
 async function executeBidFlow(project, initialSettings) {
@@ -882,7 +910,7 @@ async function executeBidFlow(project, initialSettings) {
       message: `入札処理中（順次・${bidModeLabel}）— 完了まで次のプロジェクトは保留`
     });
 
-    let projectData = await enrichProjectViaMonitor(project);
+    let projectData = { ...project };
     const preFilter = evaluateProjectFilters(projectData, settings);
     if (!preFilter.pass) {
       await skipProject(
@@ -906,14 +934,23 @@ async function executeBidFlow(project, initialSettings) {
 
     bidPageUrl = normalizeDetailsUrl(projectData.url || project.url);
 
-    if (monitorTabId) {
-      await syncFreelancerSession(monitorTabId);
-      settings = await getSettings();
+    if (projectNeedsEnrichment(projectData, settings)) {
+      projectData = await enrichProjectViaMonitor(projectData);
     }
 
-    projectData = await enrichProjectViaMonitor(projectData);
-    if (!projectData.numericProjectId) {
-      projectData = await enrichProjectViaMonitor({ ...projectData, forceEnrich: true });
+    if (projectData.bidCount != null && projectData.bidCount >= settings.maxBidCount) {
+      await skipProject(
+        project,
+        'skipped_bid_count',
+        `入札者数 ${projectData.bidCount} >= ${settings.maxBidCount}`,
+        settings
+      );
+      return;
+    }
+
+    if (monitorTabId && shouldTryApiBid(settings)) {
+      await syncFreelancerSession(monitorTabId);
+      settings = await getSettings();
     }
 
     if (!(await isBotRunning())) {

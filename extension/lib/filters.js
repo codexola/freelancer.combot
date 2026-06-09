@@ -547,8 +547,8 @@ export function getProjectAgeSeconds(project) {
 }
 
 export function evaluateAgeWindow(project, settings) {
-  const minAge = settings.bidWindowMinSec ?? 3;
-  const maxAge = settings.bidWindowMaxSec ?? 120;
+  const minAge = settings.bidWindowMinSec ?? 0;
+  const maxAge = settings.bidWindowMaxSec ?? 600;
   const ageSec = getProjectAgeSeconds(project);
 
   if (ageSec == null) {
@@ -569,7 +569,7 @@ export function evaluateAgeWindow(project, settings) {
           reason: `too_young_${detectedAge}s`,
           message: `検出から${minAge}秒未満 (${detectedAge}秒)`,
           defer: true,
-          retryInMs: Math.max(200, (minAge - detectedAge) * 1000 + 300)
+          retryInMs: Math.max(100, (minAge - detectedAge) * 1000 + 100)
         };
       }
       if (detectedAge > maxAge) {
@@ -591,7 +591,7 @@ export function evaluateAgeWindow(project, settings) {
       reason: `too_young_${ageSec}s`,
       message: `投稿から${minAge}秒未満 (${ageSec}秒)`,
       defer: true,
-      retryInMs: Math.max(200, (minAge - ageSec) * 1000 + 300)
+      retryInMs: Math.max(100, (minAge - ageSec) * 1000 + 100)
     };
   }
   if (ageSec > maxAge) {

@@ -23,6 +23,7 @@
 let isMonitoring = false;
 let observer = null;
 let scanIntervalId = null;
+let scanDebounceTimer = null;
 let seenProjectIds = new Set();
 let seenNumericIds = new Set();
 let hasSeededSeen = false;
@@ -506,14 +507,19 @@ async function startMonitoring() {
   hasSeededSeen = seenProjectIds.size > 0;
 
   runScan().catch(() => {});
-  observer = new MutationObserver(() => {
-    runScan().catch(() => {});
-  });
+  const scheduleScan = () => {
+    if (scanDebounceTimer) clearTimeout(scanDebounceTimer);
+    scanDebounceTimer = setTimeout(() => {
+      scanDebounceTimer = null;
+      runScan().catch(() => {});
+    }, 200);
+  };
+  observer = new MutationObserver(scheduleScan);
   observer.observe(document.body, { childList: true, subtree: true });
 
   const pollMs = await new Promise((resolve) => {
     chrome.storage.local.get(['settings'], (result) => {
-      resolve(result.settings?.pollIntervalMs || 1500);
+      resolve(result.settings?.pollIntervalMs || 500);
     });
   });
   if (scanIntervalId) clearInterval(scanIntervalId);
@@ -532,6 +538,10 @@ function stopMonitoring() {
   if (scanIntervalId) {
     clearInterval(scanIntervalId);
     scanIntervalId = null;
+  }
+  if (scanDebounceTimer) {
+    clearTimeout(scanDebounceTimer);
+    scanDebounceTimer = null;
   }
 }
 

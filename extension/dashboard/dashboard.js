@@ -52,7 +52,7 @@ function renderSettings() {
     'preferredAiProvider', 'claudeApiKey', 'openaiApiKey', 'proposalStyle',
     'proposalPrompt', 'proposalMinLength', 'proposalMaxLength',
     'defaultBidAmount', 'defaultDeliveryDays', 'defaultHourlyRate', 'profileName',
-    'bidWindowMinSec', 'bidWindowMaxSec', 'bidExecutionGraceSec', 'maxBidCount',
+    'pollIntervalMs', 'bidWindowMinSec', 'bidWindowMaxSec', 'bidExecutionGraceSec', 'maxBidCount',
     'freelancerOAuthToken',
     'fullName', 'fullAddress', 'minPriceUsd', 'maxBudget', 'languages'
   ];
@@ -133,9 +133,10 @@ function collectSettings() {
     defaultDeliveryDays: parseInt($('defaultDeliveryDays').value, 10) || 7,
     defaultHourlyRate: parseFloat($('defaultHourlyRate').value) || 25,
     profileName: $('profileName').value || 'General',
-    bidWindowMinSec: parseInt($('bidWindowMinSec').value, 10) || 3,
-    bidWindowMaxSec: parseInt($('bidWindowMaxSec').value, 10) || 300,
-    bidExecutionGraceSec: parseInt($('bidExecutionGraceSec').value, 10) || 180,
+    pollIntervalMs: parseInt($('pollIntervalMs')?.value, 10) || 500,
+    bidWindowMinSec: parseInt($('bidWindowMinSec').value, 10) || 0,
+    bidWindowMaxSec: parseInt($('bidWindowMaxSec').value, 10) || 600,
+    bidExecutionGraceSec: parseInt($('bidExecutionGraceSec').value, 10) || 300,
     maxBidCount: parseInt($('maxBidCount').value, 10) || 50,
     slowNetworkMode: $('slowNetworkMode').checked,
     preferApiBidding: $('preferApiBidding').checked,
